@@ -1,62 +1,221 @@
-import { useCallback } from "react"
-import { cn } from "@/lib/utils"
-import { Callout } from "@/components/callout"
-import { useLocalStorageState } from "@/hooks/use-local-storage-state"
+import { useCallback, useState } from "react";
+import {
+  Button,
+  Callout,
+  Card,
+  CardBody,
+  Divider,
+  Grid,
+  H1,
+  H2,
+  H3,
+  Link,
+  Pill,
+  Row,
+  Spacer,
+  Stack,
+  Table,
+  Text,
+  TextInput,
+  Checkbox,
+  mergeStyle,
+  useCanvasState,
+  useHostTheme,
+} from "@/canvas-ui";
 
-// ─── Types ────────────────────────────────────────────────────────────────────
+// ─── Data (mirrors nav audit mock + v3 chrome) ───────────────────────────────
 
-type RailId = "map" | "locations" | "collections" | "layers" | "recents"
-type PlaceTab = "overview" | "markers" | "activity" | "about"
-type EditorTool = "Select" | "Wall" | "Door" | "Window" | "Camera" | "Sensor" | "Cable" | "Ruler" | "Area" | "Label"
-type EditorEntry = "none" | "manage-home" | "in-context"
-type EditorRightTab = "tools" | "devices" | "properties"
-type WorkspaceFocus = "editor" | "full"
-type CollTab = "mine" | "shared" | "following"
+type RailId = "map" | "locations" | "collections" | "layers" | "recents";
+type PlaceTab = "overview" | "markers" | "activity" | "about";
+type EditorTool = "Select" | "Wall" | "Door" | "Window" | "Camera" | "Sensor" | "Cable" | "Ruler" | "Area" | "Label";
+type EditorEntry = "none" | "manage-home" | "in-context";
+type EditorRightTab = "tools" | "devices" | "properties";
+type WorkspaceFocus = "editor" | "full";
+type CollTab = "mine" | "shared" | "following";
+type UploadFlowStage = "idle" | "confirmed" | "locating" | "aligning" | "select-sites";
 
 type MockLocation = {
-  id: string
-  label: string
-  kind: "location" | "building" | "floor"
-  site: string
-  online: number
-  total: number
-  depth: number
-}
+  id: string;
+  label: string;
+  kind: "location" | "building" | "floor";
+  site: string;
+  online: number;
+  total: number;
+  depth: number;
+};
 
 type MockMarker = {
-  id: string
-  label: string
-  kind: "Camera" | "Access Control"
-  model: string
-  status: "Online" | "Offline"
-  x: number
-  y: number
-}
+  id: string;
+  label: string;
+  kind: "Camera" | "Access Control";
+  model: string;
+  status: "Online" | "Offline";
+  x: number;
+  y: number;
+};
+
+type MockUploadedFile = {
+  id: string;
+  fileName: string;
+  locationAddress: string | null;
+};
+
+type VerkadaAddressSource = "Site" | "Camera" | "Alarms area" | "Access door";
+
+type VerkadaAddressSuggestion = {
+  id: string;
+  label: string;
+  address: string;
+  source: VerkadaAddressSource;
+  mapCenter: { x: number; y: number };
+  /** Building footprint as SVG polygon points (zoomed map % coords). */
+  buildingOutline: string;
+};
 
 type AppState = {
-  rail: RailId
-  searchFocused: boolean
-  searchQuery: string
-  selectedPlaceId: string | null
-  placeTab: PlaceTab
-  editorMode: boolean
-  editorEntry: EditorEntry
-  editorTool: EditorTool
-  editorRightTab: EditorRightTab
-  selectedMarkerId: string | null
-  stampActive: boolean
-  showFovCones: boolean
-  undoCount: number
-  redoCount: number
-  activeLayers: string[]
-  expandedCollectionId: string | null
-  collTab: CollTab
-  sitePickerOpen: boolean
-  filesFlyoutOpen: boolean
-  layersClusterOpen: boolean
+  rail: RailId;
+  searchFocused: boolean;
+  searchQuery: string;
+  selectedPlaceId: string | null;
+  placeTab: PlaceTab;
+  editorMode: boolean;
+  editorEntry: EditorEntry;
+  editorTool: EditorTool;
+  editorRightTab: EditorRightTab;
+  selectedMarkerId: string | null;
+  stampActive: boolean;
+  showFovCones: boolean;
+  undoCount: number;
+  redoCount: number;
+  activeLayers: string[];
+  expandedCollectionId: string | null;
+  collTab: CollTab;
+  sitePickerOpen: boolean;
+  filesFlyoutOpen: boolean;
+  layersClusterOpen: boolean;
+  /** False = org has devices but no floorplan uploaded yet (first visit to Maps). */
+  orgHasFloorplans: boolean;
+  /** First-upload wizard: idle → confirmed → locating (per file). */
+  uploadStage: UploadFlowStage;
+  uploadedFiles: MockUploadedFile[];
+  locatingFileId: string | null;
+  locationQuery: string;
+  locationSearchFocused: boolean;
+  locationPinned: boolean;
+  selectedAddressId: string | null;
+  locationPinX: number;
+  locationPinY: number;
+  /** Floorplan alignment overlay controls. */
+  alignOpacity: number;
+  alignScale: number;
+  alignRotation: number;
+  alignOffsetX: number;
+  alignOffsetY: number;
+  /** Step 3 — link floorplan to existing Command sites. */
+  siteSearchQuery: string;
+  selectedSiteIds: string[];
+};
+
+type MockOrgSite = {
+  id: string;
+  name: string;
+  code: string;
+  devices: {
+    cameras: number;
+    accessControl: number;
+    alarms: number;
+    sensors: number;
+  };
+};
+
+/** Existing Verkada org — devices live, Maps opened for the first time, no floorplan yet. */
+function getFirstVisitDefault(): AppState {
+  return {
+    rail: "map",
+    searchFocused: false,
+    searchQuery: "",
+    selectedPlaceId: null,
+    placeTab: "overview",
+    editorMode: false,
+    editorEntry: "none",
+    editorTool: "Select",
+    editorRightTab: "tools",
+    selectedMarkerId: null,
+    stampActive: false,
+    showFovCones: false,
+    undoCount: 0,
+    redoCount: 0,
+    activeLayers: [],
+    expandedCollectionId: null,
+    collTab: "mine",
+    sitePickerOpen: false,
+    filesFlyoutOpen: false,
+    layersClusterOpen: false,
+    orgHasFloorplans: false,
+    uploadStage: "idle",
+    uploadedFiles: [],
+    locatingFileId: null,
+    locationQuery: "",
+    locationSearchFocused: false,
+    locationPinned: false,
+    selectedAddressId: null,
+    locationPinX: 48,
+    locationPinY: 52,
+    alignOpacity: 0.65,
+    alignScale: 1,
+    alignRotation: 0,
+    alignOffsetX: 0,
+    alignOffsetY: 0,
+    siteSearchQuery: "",
+    selectedSiteIds: [],
+  };
 }
 
-// ─── Data ─────────────────────────────────────────────────────────────────────
+function getEditorDefault(): AppState {
+  return {
+    rail: "map",
+    searchFocused: false,
+    searchQuery: "",
+    selectedPlaceId: "floor-3",
+    placeTab: "overview",
+    editorMode: true,
+    editorEntry: "in-context",
+    editorTool: "Select",
+    editorRightTab: "tools",
+    selectedMarkerId: null,
+    stampActive: false,
+    showFovCones: false,
+    undoCount: 3,
+    redoCount: 0,
+    activeLayers: ["Device Status"],
+    expandedCollectionId: null,
+    collTab: "mine",
+    sitePickerOpen: false,
+    filesFlyoutOpen: false,
+    layersClusterOpen: false,
+    orgHasFloorplans: true,
+    uploadStage: "idle",
+    uploadedFiles: [],
+    locatingFileId: null,
+    locationQuery: "",
+    locationSearchFocused: false,
+    locationPinned: false,
+    selectedAddressId: null,
+    locationPinX: 48,
+    locationPinY: 52,
+    alignOpacity: 0.65,
+    alignScale: 1,
+    alignRotation: 0,
+    alignOffsetX: 0,
+    alignOffsetY: 0,
+    siteSearchQuery: "",
+    selectedSiteIds: [],
+  };
+}
+
+function getDefaultState(): AppState {
+  return { ...getEditorDefault(), editorMode: false, editorEntry: "none", selectedPlaceId: null };
+}
 
 const LOCATIONS: MockLocation[] = [
   { id: "hq", label: "HQ Campus", kind: "location", site: "HQ-MAIN", online: 143, total: 156, depth: 0 },
@@ -64,7 +223,7 @@ const LOCATIONS: MockLocation[] = [
   { id: "floor-3", label: "Floor 3", kind: "floor", site: "HQ-MAIN", online: 42, total: 45, depth: 2 },
   { id: "east-campus", label: "East Campus", kind: "location", site: "EC-01", online: 65, total: 69, depth: 0 },
   { id: "warehouse-a", label: "Warehouse A", kind: "location", site: "WH-01", online: 23, total: 23, depth: 0 },
-]
+];
 
 const MARKERS: MockMarker[] = [
   { id: "cam-lobby-01", label: "Cam-Lobby-01", kind: "Camera", model: "CD52", status: "Online", x: 55, y: 35 },
@@ -72,18 +231,18 @@ const MARKERS: MockMarker[] = [
   { id: "cam-sw-04", label: "Cam-SW-04", kind: "Camera", model: "CD52", status: "Offline", x: 75, y: 42 },
   { id: "door-007", label: "Door-007", kind: "Access Control", model: "AC42", status: "Online", x: 58, y: 68 },
   { id: "cam-nw-02", label: "Cam-NW-02", kind: "Camera", model: "CD31", status: "Online", x: 70, y: 72 },
-]
+];
 
 const COLLECTIONS = [
   { id: "hq-ext", label: "HQ External Cameras", count: 12, owned: true, shared: false },
   { id: "door-audit", label: "Door Access Audit", count: 8, owned: true, shared: false },
   { id: "parking-a", label: "Parking Zone A", count: 4, owned: false, shared: true },
-]
+];
 
 const LAYER_GROUPS: Record<string, string[]> = {
   "Devices & Entities": ["Cameras", "Access Control", "Alarms", "Sensors"],
   Visualizations: ["Device Status", "Coverage", "Events & Alerts", "Foot Traffic"],
-}
+};
 
 const RAIL_ITEMS: { id: RailId; abbr: string; label: string }[] = [
   { id: "map", abbr: "M", label: "Map" },
@@ -91,94 +250,365 @@ const RAIL_ITEMS: { id: RailId; abbr: string; label: string }[] = [
   { id: "collections", abbr: "C", label: "Collections" },
   { id: "layers", abbr: "Ly", label: "Layers" },
   { id: "recents", abbr: "R", label: "Recents" },
-]
+];
 
-const PLACE_TABS: PlaceTab[] = ["overview", "markers", "activity", "about"]
+const PLACE_TABS: PlaceTab[] = ["overview", "markers", "activity", "about"];
 
 const EDITOR_TOOL_GROUPS: { label: string; tools: EditorTool[] }[] = [
   { label: "Structural", tools: ["Wall", "Door", "Window"] },
   { label: "Devices", tools: ["Camera", "Sensor"] },
   { label: "Paths & measure", tools: ["Cable", "Ruler"] },
   { label: "Space & labels", tools: ["Area", "Label"] },
-]
+];
 
-const EDITOR_TOOLS: EditorTool[] = ["Select", ...EDITOR_TOOL_GROUPS.flatMap((g) => g.tools)]
+const EDITOR_TOOLS: EditorTool[] = ["Select", ...EDITOR_TOOL_GROUPS.flatMap((g) => g.tools)];
 
-const UNPLACED_DEVICES = [
-  { id: "d1", label: "CD52 · Lobby cam", site: "HQ-MAIN", family: "Cameras" },
-  { id: "d2", label: "AC42 · Main entry", site: "HQ-MAIN", family: "Doors" },
-  { id: "d3", label: "SV23 · Server room", site: "HQ-MAIN", family: "Sensors" },
-  { id: "d4", label: "CD31 · NE corner", site: "HQ-MAIN", family: "Cameras" },
-]
+const UNPLACED_DEVICE_FAMILIES = ["Cameras", "Access Control", "Alarms", "Sensors"] as const;
+
+type UnplacedDeviceFamily = (typeof UNPLACED_DEVICE_FAMILIES)[number];
+
+type MockUnplacedDevice = {
+  id: string;
+  label: string;
+  model: string;
+  siteId: string;
+  family: UnplacedDeviceFamily;
+};
+
+const UNPLACED_DEVICES: MockUnplacedDevice[] = [
+  { id: "d-hq-c1", label: "Cam-Lobby-01", model: "CD52", siteId: "site-hq", family: "Cameras" },
+  { id: "d-hq-c2", label: "Cam-NE-01", model: "CD31", siteId: "site-hq", family: "Cameras" },
+  { id: "d-hq-a1", label: "Door-007", model: "AC42", siteId: "site-hq", family: "Access Control" },
+  { id: "d-hq-al1", label: "Lobby perimeter", model: "Zone A", siteId: "site-hq", family: "Alarms" },
+  { id: "d-hq-s1", label: "SV-Lobby", model: "SV23", siteId: "site-hq", family: "Sensors" },
+  { id: "d-ec-c1", label: "Cam-East-01", model: "CD52", siteId: "site-east", family: "Cameras" },
+  { id: "d-ec-c2", label: "Cam-Parking-02", model: "CD31", siteId: "site-east", family: "Cameras" },
+  { id: "d-ec-a1", label: "Door-East-Main", model: "AC42", siteId: "site-east", family: "Access Control" },
+  { id: "d-ec-s1", label: "SV-Gate", model: "SV11", siteId: "site-east", family: "Sensors" },
+  { id: "d-wh-c1", label: "Cam-Dock-02", model: "CD31", siteId: "site-warehouse", family: "Cameras" },
+  { id: "d-wh-a1", label: "Door-Dock-4", model: "AC41", siteId: "site-warehouse", family: "Access Control" },
+  { id: "d-wh-al1", label: "Dock perimeter", model: "Zone B", siteId: "site-warehouse", family: "Alarms" },
+  { id: "d-rt-c1", label: "Cam-Floor-01", model: "CD52", siteId: "site-retail", family: "Cameras" },
+  { id: "d-rt-a1", label: "Door-Front", model: "AC42", siteId: "site-retail", family: "Access Control" },
+  { id: "d-mfg-c1", label: "Cam-Line-03", model: "CD62", siteId: "site-plant", family: "Cameras" },
+  { id: "d-mfg-c2", label: "Cam-Warehouse", model: "CD52", siteId: "site-plant", family: "Cameras" },
+  { id: "d-mfg-al1", label: "Production floor", model: "Zone C", siteId: "site-plant", family: "Alarms" },
+  { id: "d-mfg-s1", label: "SV-Cold-room", model: "SV23", siteId: "site-plant", family: "Sensors" },
+];
 
 const MANAGE_HOME_ROWS = [
   { building: "Main Building", floor: "Floor 3", status: "In progress", contractor: "CDMX-04", devices: "42/45" },
   { building: "Main Building", floor: "Floor 2", status: "Complete", contractor: "CDMX-02", devices: "38/38" },
   { building: "East Wing", floor: "Floor 1", status: "Not started", contractor: "—", devices: "0/12" },
-]
+];
 
-const EDITOR_DEFAULT: AppState = {
-  rail: "map",
-  searchFocused: false,
-  searchQuery: "",
-  selectedPlaceId: "floor-3",
-  placeTab: "overview",
-  editorMode: true,
-  editorEntry: "in-context",
-  editorTool: "Select",
-  editorRightTab: "tools",
-  selectedMarkerId: null,
-  stampActive: false,
-  showFovCones: false,
-  undoCount: 3,
-  redoCount: 0,
-  activeLayers: ["Device Status"],
-  expandedCollectionId: null,
-  collTab: "mine",
-  sitePickerOpen: false,
-  filesFlyoutOpen: false,
-  layersClusterOpen: false,
+const MOCK_UPLOAD_FILE = "Floor-1-Lobby.pdf";
+
+const MOCK_UPLOAD_FILES = ["Floor-1-Lobby.pdf", "Floor-2-Office.pdf", "Warehouse-Level-1.png"];
+
+const MOCK_UPLOAD_FILE_ROW: MockUploadedFile = {
+  id: "file-1",
+  fileName: MOCK_UPLOAD_FILE,
+  locationAddress: null,
+};
+
+const VERKADA_ADDRESS_SUGGESTIONS: VerkadaAddressSuggestion[] = [
+  {
+    id: "site-hq",
+    label: "HQ Campus · HQ-MAIN",
+    address: "500 Howard St, San Francisco, CA",
+    source: "Site",
+    mapCenter: { x: 50, y: 52 },
+    buildingOutline: "38%,38% 62%,36% 64%,58% 40%,60%",
+  },
+  {
+    id: "cam-lobby",
+    label: "Cam-Lobby-01 · CD52",
+    address: "500 Howard St, San Francisco, CA · Lobby",
+    source: "Camera",
+    mapCenter: { x: 50, y: 52 },
+    buildingOutline: "38%,38% 62%,36% 64%,58% 40%,60%",
+  },
+  {
+    id: "alarms-lobby",
+    label: "Lobby perimeter zone",
+    address: "500 Howard St, San Francisco, CA · Alarms",
+    source: "Alarms area",
+    mapCenter: { x: 50, y: 52 },
+    buildingOutline: "38%,38% 62%,36% 64%,58% 40%,60%",
+  },
+  {
+    id: "door-main",
+    label: "Door-007 · Main entry",
+    address: "502 Howard St, San Francisco, CA",
+    source: "Access door",
+    mapCenter: { x: 51, y: 53 },
+    buildingOutline: "39%,39% 63%,37% 65%,59% 41%,61%",
+  },
+  {
+    id: "site-warehouse",
+    label: "Warehouse A · WH-01",
+    address: "2400 Embarcadero, Oakland, CA",
+    source: "Site",
+    mapCenter: { x: 48, y: 48 },
+    buildingOutline: "32%,32% 68%,30% 70%,66% 34%,68%",
+  },
+  {
+    id: "cam-dock",
+    label: "Cam-Dock-02 · CD31",
+    address: "2400 Embarcadero, Oakland, CA · Dock 4",
+    source: "Camera",
+    mapCenter: { x: 48, y: 48 },
+    buildingOutline: "32%,32% 68%,30% 70%,66% 34%,68%",
+  },
+];
+
+function getAddressSuggestion(id: string | null): VerkadaAddressSuggestion | undefined {
+  return VERKADA_ADDRESS_SUGGESTIONS.find((s) => s.id === id);
 }
 
-const DEFAULT_STATE: AppState = { ...EDITOR_DEFAULT, editorMode: false, editorEntry: "none", selectedPlaceId: null }
+function filterAddressSuggestions(query: string): VerkadaAddressSuggestion[] {
+  const q = query.trim().toLowerCase();
+  if (!q) return VERKADA_ADDRESS_SUGGESTIONS;
+  return VERKADA_ADDRESS_SUGGESTIONS.filter(
+    (s) =>
+      s.label.toLowerCase().includes(q) ||
+      s.address.toLowerCase().includes(q) ||
+      s.source.toLowerCase().includes(q),
+  );
+}
+
+const ORG_SITES: MockOrgSite[] = [
+  {
+    id: "site-hq",
+    name: "HQ Campus",
+    code: "HQ-MAIN",
+    devices: { cameras: 142, accessControl: 28, alarms: 12, sensors: 45 },
+  },
+  {
+    id: "site-east",
+    name: "East Campus",
+    code: "EC-01",
+    devices: { cameras: 65, accessControl: 14, alarms: 6, sensors: 22 },
+  },
+  {
+    id: "site-warehouse",
+    name: "Warehouse A",
+    code: "WH-01",
+    devices: { cameras: 23, accessControl: 8, alarms: 4, sensors: 11 },
+  },
+  {
+    id: "site-retail",
+    name: "Retail Flagship",
+    code: "RT-101",
+    devices: { cameras: 38, accessControl: 6, alarms: 2, sensors: 8 },
+  },
+  {
+    id: "site-plant",
+    name: "Manufacturing Plant",
+    code: "MFG-02",
+    devices: { cameras: 89, accessControl: 19, alarms: 9, sensors: 31 },
+  },
+];
+
+function formatSiteDeviceBreakdown(site: MockOrgSite): string {
+  const { cameras, accessControl, alarms, sensors } = site.devices;
+  return `${cameras} cameras · ${accessControl} access · ${alarms} alarms · ${sensors} sensors`;
+}
+
+function filterOrgSites(query: string): MockOrgSite[] {
+  const q = query.trim().toLowerCase();
+  if (!q) return ORG_SITES;
+  return ORG_SITES.filter(
+    (s) => s.name.toLowerCase().includes(q) || s.code.toLowerCase().includes(q),
+  );
+}
+
+const FIRST_VISIT_PRESET_IDS = new Set([
+  "first-visit",
+  "empty-org",
+  "manage-home-empty",
+  "upload-confirmed",
+  "upload-multi",
+  "find-location",
+  "find-location-search",
+  "find-location-pinned",
+  "align-floorplan",
+  "select-sites",
+]);
 
 const EDITOR_PRESETS: { id: string; label: string; description: string; state: Partial<AppState> }[] = [
+  {
+    id: "first-visit",
+    label: "0 · First visit to Maps",
+    description:
+      "Existing Verkada org (cameras, doors already live) — someone opens Maps for the first time. No floorplan yet; center onboarding explains “where” questions and pushes upload.",
+    state: getFirstVisitDefault(),
+  },
+  {
+    id: "upload-confirmed",
+    label: "0a · Upload confirmed (1 file)",
+    description: "Single floorplan uploaded — file tile appears below the drop zone (Navan-style confirmation).",
+    state: { ...getFirstVisitDefault(), uploadStage: "confirmed", uploadedFiles: [MOCK_UPLOAD_FILE_ROW] },
+  },
+  {
+    id: "upload-multi",
+    label: "0a · Multi-file upload",
+    description: "Two floorplans uploaded — each file needs its own location via inline Set location.",
+    state: {
+      ...getFirstVisitDefault(),
+      uploadStage: "confirmed",
+      uploadedFiles: [
+        MOCK_UPLOAD_FILE_ROW,
+        { id: "file-2", fileName: "Floor-2-Office.pdf", locationAddress: null },
+      ],
+    },
+  },
+  {
+    id: "find-location",
+    label: "0c · Set location (map)",
+    description: "Map-first location picker — search bar on top, Mapbox basemap, Verkada address suggestions on focus.",
+    state: {
+      ...getFirstVisitDefault(),
+      uploadStage: "locating",
+      uploadedFiles: [MOCK_UPLOAD_FILE_ROW],
+      locatingFileId: "file-1",
+      locationQuery: "",
+      locationSearchFocused: false,
+      locationPinned: false,
+      selectedAddressId: null,
+    },
+  },
+  {
+    id: "find-location-search",
+    label: "0c · Set location (suggestions)",
+    description: "Search focused — suggestions from sites, camera addresses, alarms areas, and access doors.",
+    state: {
+      ...getFirstVisitDefault(),
+      uploadStage: "locating",
+      uploadedFiles: [MOCK_UPLOAD_FILE_ROW],
+      locatingFileId: "file-1",
+      locationQuery: "",
+      locationSearchFocused: true,
+      locationPinned: false,
+      selectedAddressId: null,
+    },
+  },
+  {
+    id: "find-location-pinned",
+    label: "0c · Set location (address selected)",
+    description: "Address selected on step 1 — map zoomed to building footprint, CTA to align file.",
+    state: {
+      ...getFirstVisitDefault(),
+      uploadStage: "locating",
+      uploadedFiles: [MOCK_UPLOAD_FILE_ROW],
+      locatingFileId: "file-1",
+      locationQuery: VERKADA_ADDRESS_SUGGESTIONS[0].address,
+      locationSearchFocused: false,
+      locationPinned: true,
+      selectedAddressId: VERKADA_ADDRESS_SUGGESTIONS[0].id,
+      locationPinX: VERKADA_ADDRESS_SUGGESTIONS[0].mapCenter.x,
+      locationPinY: VERKADA_ADDRESS_SUGGESTIONS[0].mapCenter.y,
+    },
+  },
+  {
+    id: "align-floorplan",
+    label: "0d · Align floorplan",
+    description: "Floorplan raster overlaid on the zoomed building footprint — adjust scale, rotation, opacity before placing devices.",
+    state: {
+      ...getFirstVisitDefault(),
+      uploadStage: "aligning",
+      uploadedFiles: [{ ...MOCK_UPLOAD_FILE_ROW, locationAddress: "500 Howard St, San Francisco, CA" }],
+      locatingFileId: "file-1",
+      locationQuery: VERKADA_ADDRESS_SUGGESTIONS[0].address,
+      locationPinned: true,
+      selectedAddressId: VERKADA_ADDRESS_SUGGESTIONS[0].id,
+      locationPinX: VERKADA_ADDRESS_SUGGESTIONS[0].mapCenter.x,
+      locationPinY: VERKADA_ADDRESS_SUGGESTIONS[0].mapCenter.y,
+      alignOpacity: 0.65,
+      alignScale: 1,
+      alignRotation: 0,
+      alignOffsetX: 0,
+      alignOffsetY: 0,
+    },
+  },
+  {
+    id: "select-sites",
+    label: "0e · Select sites",
+    description: "Step 3 — floorplan cropped to building; pick at least one org site with device counts before placing devices.",
+    state: {
+      ...getFirstVisitDefault(),
+      uploadStage: "select-sites",
+      uploadedFiles: [{ ...MOCK_UPLOAD_FILE_ROW, locationAddress: "500 Howard St, San Francisco, CA" }],
+      locatingFileId: "file-1",
+      locationQuery: VERKADA_ADDRESS_SUGGESTIONS[0].address,
+      locationPinned: true,
+      selectedAddressId: VERKADA_ADDRESS_SUGGESTIONS[0].id,
+      locationPinX: VERKADA_ADDRESS_SUGGESTIONS[0].mapCenter.x,
+      locationPinY: VERKADA_ADDRESS_SUGGESTIONS[0].mapCenter.y,
+      alignOpacity: 1,
+      alignScale: 1,
+      alignRotation: 0,
+      alignOffsetX: 0,
+      alignOffsetY: 0,
+      siteSearchQuery: "",
+      selectedSiteIds: [],
+    },
+  },
+  {
+    id: "manage-home-empty",
+    label: "0b · Manage Maps (no floorplans)",
+    description: "Admin inventory when no buildings exist yet — contractor import path after first floorplan upload.",
+    state: { ...getFirstVisitDefault(), editorEntry: "manage-home" },
+  },
   {
     id: "manage-home",
     label: "1 · Manage Maps home",
     description: "Admin entry: org floorplan inventory, completion status, contractor assignment.",
-    state: { ...EDITOR_DEFAULT, editorMode: false, editorEntry: "manage-home", selectedPlaceId: null },
+    state: { ...getEditorDefault(), editorMode: false, editorEntry: "manage-home", selectedPlaceId: null },
   },
   {
     id: "entry-place",
     label: "2 · Entry from Place card",
     description: "Viewer on Floor 3; Open in Editor promotes to edit mode without route change.",
-    state: { ...EDITOR_DEFAULT, editorMode: false, editorEntry: "none", placeTab: "overview" },
+    state: { ...getEditorDefault(), editorMode: false, editorEntry: "none", placeTab: "overview" },
   },
   {
     id: "editor-idle",
     label: "3 · Editor idle (Select)",
     description: "In-context edit. Right panel shows tool groups. Left panel lists unplaced devices.",
-    state: { ...EDITOR_DEFAULT, editorTool: "Select", editorRightTab: "tools", selectedMarkerId: null },
+    state: { ...getEditorDefault(), editorTool: "Select", editorRightTab: "tools", selectedMarkerId: null },
+  },
+  {
+    id: "editor-plotting",
+    label: "3 · Editor · Start plotting devices",
+    description: "After onboarding — full editor with Draw Devices panel open; devices grouped by site and family for selected sites.",
+    state: {
+      ...getEditorDefault(),
+      selectedSiteIds: ["site-hq", "site-east"],
+      editorTool: "Select",
+      editorRightTab: "devices",
+      stampActive: false,
+    },
   },
   {
     id: "editor-wall",
     label: "4 · Wall tool",
     description: "Vector line segments, snap-to-grid. PRD P0 structural drawing.",
-    state: { ...EDITOR_DEFAULT, editorTool: "Wall", editorRightTab: "properties", selectedMarkerId: null },
+    state: { ...getEditorDefault(), editorTool: "Wall", editorRightTab: "properties", selectedMarkerId: null },
   },
   {
     id: "editor-door",
     label: "5 · Door tool",
     description: "Door placement on wall segment with width + swing direction.",
-    state: { ...EDITOR_DEFAULT, editorTool: "Door", editorRightTab: "properties" },
+    state: { ...getEditorDefault(), editorTool: "Door", editorRightTab: "properties" },
   },
   {
     id: "editor-camera-stamp",
     label: "6 · Camera stamp",
     description: "Click-to-place device tokens. Left panel filters commissioned cameras.",
     state: {
-      ...EDITOR_DEFAULT,
+      ...getEditorDefault(),
       editorTool: "Camera",
       editorRightTab: "devices",
       stampActive: true,
@@ -190,7 +620,7 @@ const EDITOR_PRESETS: { id: string; label: string; description: string; state: P
     label: "7 · FOV adjust",
     description: "Drag handles on selected camera cone. Respects occlusion when toggled.",
     state: {
-      ...EDITOR_DEFAULT,
+      ...getEditorDefault(),
       editorTool: "Camera",
       editorRightTab: "properties",
       selectedMarkerId: "cam-lobby-01",
@@ -201,32 +631,32 @@ const EDITOR_PRESETS: { id: string; label: string; description: string; state: P
     id: "editor-cable",
     label: "8 · Cable path",
     description: "Polygon line tool, autosnap to device endpoints, verify controller association.",
-    state: { ...EDITOR_DEFAULT, editorTool: "Cable", editorRightTab: "properties" },
+    state: { ...getEditorDefault(), editorTool: "Cable", editorRightTab: "properties" },
   },
   {
     id: "editor-ruler",
     label: "9 · Ruler",
     description: "Measurement lines carried forward from Site Planner ruler mode.",
-    state: { ...EDITOR_DEFAULT, editorTool: "Ruler", editorRightTab: "properties" },
+    state: { ...getEditorDefault(), editorTool: "Ruler", editorRightTab: "properties" },
   },
   {
     id: "editor-area",
     label: "10 · Area / zone",
     description: "Create, name, and reshape named polygons (Lobby, Server room).",
-    state: { ...EDITOR_DEFAULT, editorTool: "Area", editorRightTab: "properties" },
+    state: { ...getEditorDefault(), editorTool: "Area", editorRightTab: "properties" },
   },
   {
     id: "editor-label",
     label: "11 · Label",
     description: "Room names, entry/exit points as annotation tokens.",
-    state: { ...EDITOR_DEFAULT, editorTool: "Label", editorRightTab: "properties" },
+    state: { ...getEditorDefault(), editorTool: "Label", editorRightTab: "properties" },
   },
   {
     id: "editor-marker",
     label: "12 · Device selected",
     description: "Properties inspector: model, orientation, delete. Bulk edit when multi-select.",
     state: {
-      ...EDITOR_DEFAULT,
+      ...getEditorDefault(),
       editorTool: "Select",
       editorRightTab: "properties",
       selectedMarkerId: "cam-lobby-01",
@@ -236,100 +666,139 @@ const EDITOR_PRESETS: { id: string; label: string; description: string; state: P
     id: "editor-scale",
     label: "13 · Scale & align",
     description: "Attach raster floorplan, set scale, align walls to blueprint perimeter.",
-    state: { ...EDITOR_DEFAULT, editorTool: "Select", editorRightTab: "properties", filesFlyoutOpen: true },
+    state: { ...getEditorDefault(), editorTool: "Select", editorRightTab: "properties", filesFlyoutOpen: true },
   },
   {
     id: "editor-drop",
     label: "14 · Dragover upload",
     description: "Full-bleed drop hint on map when files drag over an open Place.",
-    state: { ...EDITOR_DEFAULT, editorMode: false, editorEntry: "none", placeTab: "overview" },
+    state: { ...getEditorDefault(), editorMode: false, editorEntry: "none", placeTab: "overview" },
   },
-]
+];
 
 const VIEWER_PRESETS: { id: string; label: string; description: string; state: Partial<AppState> }[] = [
   {
     id: "null",
     label: "V · Null state",
     description: "Pure map. Site + Alerts cluster, no editor chrome.",
-    state: { ...DEFAULT_STATE },
+    state: getDefaultState(),
   },
   {
     id: "place",
     label: "V · Place card",
     description: "Hero + action bar before editor entry.",
-    state: { ...DEFAULT_STATE, selectedPlaceId: "floor-3", placeTab: "overview" },
+    state: { ...getDefaultState(), selectedPlaceId: "floor-3", placeTab: "overview" },
   },
   {
     id: "files",
     label: "V · Files flyout",
     description: "Upload path for unplaced floorplans.",
-    state: { ...DEFAULT_STATE, filesFlyoutOpen: true },
+    state: { ...getDefaultState(), filesFlyoutOpen: true },
   },
-]
+];
 
-const PRESET_STATES = [...EDITOR_PRESETS, ...VIEWER_PRESETS]
-
-// ─── Helpers ──────────────────────────────────────────────────────────────────
+const PRESET_STATES = [...EDITOR_PRESETS, ...VIEWER_PRESETS];
 
 function mergeAppState(base: AppState, patch: Partial<AppState>): AppState {
-  return { ...base, ...patch }
+  return { ...base, ...patch };
 }
 
 function stateLabel(s: AppState): string {
-  const place = LOCATIONS.find((l) => l.id === s.selectedPlaceId)
-  const marker = MARKERS.find((m) => m.id === s.selectedMarkerId)
-  if (s.editorEntry === "manage-home") return "manage maps home"
-  if (s.editorMode && marker) return `editor › ${marker.label} › properties`
-  if (s.editorMode && s.stampActive) return `editor › ${s.editorTool} stamp`
-  if (s.editorMode) return `editor › ${s.editorTool} › ${s.editorRightTab}`
-  if (s.filesFlyoutOpen) return "files flyout"
-  if (s.sitePickerOpen) return "site picker open"
-  if (place) return `viewer › ${place.label} › ${s.placeTab}`
-  if (s.searchFocused) return `search${s.searchQuery ? ` › "${s.searchQuery}"` : " (open)"}`
-  if (s.layersClusterOpen) return `${s.rail} rail + layers cluster`
-  return `${s.rail} rail`
+  const place = LOCATIONS.find((l) => l.id === s.selectedPlaceId);
+  const marker = MARKERS.find((m) => m.id === s.selectedMarkerId);
+  if (!s.orgHasFloorplans && s.editorEntry === "manage-home") return "manage maps home (no floorplans)";
+  if (!s.orgHasFloorplans && s.uploadStage === "select-sites") {
+    const n = (s.selectedSiteIds ?? []).length;
+    return `first visit › select sites${n > 0 ? ` (${n} selected)` : ""}`;
+  }
+  if (!s.orgHasFloorplans && s.uploadStage === "aligning") {
+    return "first visit › align floorplan to building";
+  }
+  if (!s.orgHasFloorplans && s.uploadStage === "locating" && s.locationPinned) {
+    return "first visit › address selected › align next";
+  }
+  if (!s.orgHasFloorplans && s.uploadStage === "locating" && (s.locationSearchFocused ?? false)) {
+    return "first visit › address suggestions";
+  }
+  if (!s.orgHasFloorplans && s.uploadStage === "locating") {
+    const file = (s.uploadedFiles ?? []).find((f) => f.id === s.locatingFileId);
+    return `first visit › set location${file ? ` › ${file.fileName}` : ""}`;
+  }
+  if (!s.orgHasFloorplans && s.uploadStage === "confirmed" && (s.uploadedFiles ?? []).length > 0) {
+    const count = (s.uploadedFiles ?? []).length;
+    return `first visit › ${count} file${count === 1 ? "" : "s"} uploaded`;
+  }
+  if (!s.orgHasFloorplans && !s.editorMode && s.uploadStage === "idle") return "viewer › first visit › onboarding";
+  if (s.editorEntry === "manage-home") return "manage maps home";
+  if (s.editorMode && marker) return `editor › ${marker.label} › properties`;
+  if (s.editorMode && s.stampActive) return `editor › ${s.editorTool} stamp`;
+  if (s.editorMode) return `editor › ${s.editorTool} › ${s.editorRightTab}`;
+  if (s.filesFlyoutOpen) return "files flyout";
+  if (s.sitePickerOpen) return "site picker open";
+  if (place) return `viewer › ${place.label} › ${s.placeTab}`;
+  if (s.searchFocused) return `search${s.searchQuery ? ` › "${s.searchQuery}"` : " (open)"}`;
+  if (s.layersClusterOpen) return `${s.rail} rail + layers cluster`;
+  return `${s.rail} rail`;
 }
 
-function btnClass(variant: "primary" | "secondary" | "ghost", extra?: string) {
-  return cn(
-    "rounded border px-2 py-0.5 text-[10px] transition-colors",
-    variant === "primary" && "border-sky-500/30 bg-sky-500/10 text-sky-300 hover:bg-sky-500/20",
-    variant === "secondary" && "border-border bg-muted/50 hover:border-foreground/40",
-    variant === "ghost" && "border-transparent text-muted-foreground hover:text-foreground hover:bg-muted/40",
-    extra,
-  )
+function WireBox({
+  children,
+  style,
+  onClick,
+  title,
+}: {
+  children?: React.ReactNode;
+  style?: Record<string, string | number>;
+  onClick?: () => void;
+  title?: string;
+}) {
+  const theme = useHostTheme();
+  return (
+    <div
+      title={title}
+      onClick={onClick}
+      style={mergeStyle(
+        {
+          border: `1px solid ${theme.stroke.secondary}`,
+          background: theme.bg.elevated,
+          borderRadius: 4,
+          boxSizing: "border-box",
+        },
+        style,
+      )}
+    >
+      {children}
+    </div>
+  );
 }
 
 function Chip({ label, tone }: { label: string; tone?: "accent" | "success" | "warning" | "danger" | "neutral" }) {
-  const cls = {
-    accent: "border-sky-500/30 bg-sky-500/10 text-sky-300",
-    success: "border-emerald-500/30 bg-emerald-500/10 text-emerald-300",
-    warning: "border-amber-500/30 bg-amber-500/10 text-amber-300",
-    danger: "border-red-500/30 bg-red-500/10 text-red-300",
-    neutral: "border-border bg-muted/50 text-muted-foreground",
-  }[tone ?? "neutral"]
-  return <span className={cn("inline-block rounded-full border px-1.5 py-px text-[10px] leading-tight", cls)}>{label}</span>
-}
-
-function WireBox({ className, style, children, onClick, title }: {
-  className?: string
-  style?: React.CSSProperties
-  children?: React.ReactNode
-  onClick?: () => void
-  title?: string
-}) {
-  const Tag = onClick ? "button" : "div"
+  const theme = useHostTheme();
+  const color =
+    tone === "accent"
+      ? theme.accent.primary
+      : tone === "success"
+        ? theme.text.link
+        : tone === "warning"
+          ? theme.text.secondary
+          : tone === "danger"
+            ? theme.diff.removed
+            : theme.text.tertiary;
   return (
-    <Tag
-      type={onClick ? "button" : undefined}
-      title={title}
-      onClick={onClick}
-      style={style}
-      className={cn("rounded border border-border bg-card box-border", className)}
+    <span
+      style={{
+        display: "inline-block",
+        border: `1px solid ${theme.stroke.secondary}`,
+        color,
+        fontSize: 10,
+        padding: "1px 6px",
+        borderRadius: 999,
+        lineHeight: "14px",
+      }}
     >
-      {children}
-    </Tag>
-  )
+      {label}
+    </span>
+  );
 }
 
 function PanelListRow({
@@ -338,79 +807,251 @@ function PanelListRow({
   depth = 0,
   onClick,
 }: {
-  label: string
-  trailing?: string
-  depth?: number
-  onClick?: () => void
+  label: string;
+  trailing?: string;
+  depth?: number;
+  onClick?: () => void;
 }) {
-  const Tag = onClick ? "button" : "div"
+  const theme = useHostTheme();
   return (
-    <Tag
-      type={onClick ? "button" : undefined}
+    <button
+      type="button"
       onClick={onClick}
-      className={cn(
-        "flex w-full items-center gap-1.5 px-2 py-1.5 text-left text-[11px]",
-        onClick && "hover:bg-muted/40 transition-colors cursor-pointer",
-      )}
-      style={{ paddingLeft: `${8 + depth * 12}px` }}
+      style={{
+        display: "flex",
+        width: "100%",
+        alignItems: "center",
+        gap: 6,
+        padding: "6px 8px",
+        paddingLeft: 8 + depth * 12,
+        border: "none",
+        background: "transparent",
+        color: theme.text.primary,
+        cursor: onClick ? "pointer" : "default",
+        fontSize: 11,
+        textAlign: "left",
+      }}
     >
-      <span className="flex-1 truncate">{label}</span>
-      {trailing ? <span className="shrink-0 text-[10px] text-muted-foreground">{trailing}</span> : null}
-    </Tag>
-  )
+      <span style={{ flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{label}</span>
+      {trailing ? <span style={{ color: theme.text.tertiary, fontSize: 10 }}>{trailing}</span> : null}
+    </button>
+  );
 }
 
-// ─── Sub-components ───────────────────────────────────────────────────────────
-
-function ManageMapsHome({ onOpenFloor }: { onOpenFloor: () => void }) {
+function ManageMapsHome({
+  empty,
+  onOpenFloor,
+  onCreateBuilding,
+  onImportFiles,
+}: {
+  empty?: boolean;
+  onOpenFloor: () => void;
+  onCreateBuilding?: () => void;
+  onImportFiles?: () => void;
+}) {
+  const theme = useHostTheme();
   return (
-    <div className="flex h-full flex-col gap-3 overflow-auto p-4">
-      <div className="space-y-1">
-        <div className="text-sm font-semibold">Manage Maps</div>
-        <p className="text-xs text-muted-foreground">
-          Org floorplan inventory — CDMX contractors land here to pick up assigned buildings.
-        </p>
-      </div>
-      <div className="flex flex-wrap gap-2">
-        <button className={btnClass("primary")}>New building</button>
-        <button className={btnClass("secondary")}>Import files</button>
-        <button className={btnClass("secondary")}>Assign contractor</button>
-      </div>
-      <WireBox className="overflow-hidden p-0">
-        <div className="grid grid-cols-5 gap-2 border-b border-border/50 px-3 py-2 text-[10px] uppercase text-muted-foreground">
-          <span>Building</span>
-          <span>Floor</span>
-          <span>Status</span>
-          <span>Contractor</span>
-          <span>Devices</span>
-        </div>
-        {MANAGE_HOME_ROWS.map((row) => (
-          <button
-            key={`${row.building}-${row.floor}`}
-            type="button"
-            onClick={onOpenFloor}
-            className="grid w-full grid-cols-5 gap-2 border-b border-border/30 px-3 py-2.5 text-left text-[11px] hover:bg-muted/30 transition-colors"
-          >
-            <span>{row.building}</span>
-            <span>{row.floor}</span>
-            <span>{row.status}</span>
-            <span>{row.contractor}</span>
-            <span>{row.devices}</span>
-          </button>
-        ))}
+    <Stack gap={12} style={{ padding: 16, height: "100%", overflow: "auto" }}>
+      <Stack gap={4}>
+        <Text weight="semibold">Manage Maps</Text>
+        <Text size="small" tone="secondary">
+          {empty
+            ? "Start here for a new org — create buildings, import contractor files, then open floors in the editor."
+            : "Org floorplan inventory — CDMX contractors land here to pick up assigned buildings."}
+        </Text>
+      </Stack>
+      <Row gap={8} wrap>
+        {empty ? (
+          <>
+            <Button variant="primary" onClick={onCreateBuilding}>
+              Create first building
+            </Button>
+            <Button variant="secondary" onClick={onImportFiles}>
+              Import files
+            </Button>
+          </>
+        ) : (
+          <>
+            <Button variant="primary">New building</Button>
+            <Button variant="secondary">Import files</Button>
+            <Button variant="secondary">Assign contractor</Button>
+          </>
+        )}
+      </Row>
+      <WireBox style={{ padding: 0, overflow: "hidden" }}>
+        {empty ? (
+          <Table
+            headers={["Building", "Floor", "Status", "Contractor", "Devices"]}
+            rows={[]}
+            framed={false}
+            emptyMessage={
+              <Stack gap={8} style={{ alignItems: "center", padding: "24px 16px", textAlign: "center" }}>
+                <Text weight="semibold">No buildings yet</Text>
+                <Text size="small" tone="secondary">
+                  Floorplans and device placement live inside buildings. Create one to unlock the map editor.
+                </Text>
+                <Button variant="primary" onClick={onCreateBuilding}>
+                  Create first building
+                </Button>
+              </Stack>
+            }
+          />
+        ) : (
+          <>
+            <div
+              style={{
+                display: "grid",
+                gridTemplateColumns: "1fr 1fr 1fr 1fr 1fr",
+                gap: 8,
+                padding: "8px 12px",
+                borderBottom: `1px solid ${theme.stroke.tertiary}`,
+                fontSize: 10,
+                color: theme.text.tertiary,
+                textTransform: "uppercase",
+              }}
+            >
+              <span>Building</span>
+              <span>Floor</span>
+              <span>Status</span>
+              <span>Contractor</span>
+              <span>Devices</span>
+            </div>
+            {MANAGE_HOME_ROWS.map((row) => (
+              <button
+                key={`${row.building}-${row.floor}`}
+                type="button"
+                onClick={onOpenFloor}
+                style={{
+                  display: "grid",
+                  gridTemplateColumns: "1fr 1fr 1fr 1fr 1fr",
+                  gap: 8,
+                  width: "100%",
+                  padding: "10px 12px",
+                  border: "none",
+                  borderBottom: `1px solid ${theme.stroke.tertiary}`,
+                  background: "transparent",
+                  color: theme.text.primary,
+                  cursor: "pointer",
+                  fontSize: 11,
+                  textAlign: "left",
+                }}
+              >
+                <span>{row.building}</span>
+                <span>{row.floor}</span>
+                <span>{row.status}</span>
+                <span>{row.contractor}</span>
+                <span>{row.devices}</span>
+              </button>
+            ))}
+          </>
+        )}
       </WireBox>
-    </div>
-  )
+    </Stack>
+  );
+}
+
+function FirstVisitLeftPanel({ setState }: { setState: (patch: Partial<AppState>) => void }) {
+  return (
+    <Stack gap={10} style={{ padding: 12, overflow: "auto", height: "100%" }}>
+      <Text size="small" tone="tertiary" style={{ fontSize: 10, textTransform: "uppercase" }}>
+        Your org
+      </Text>
+      <Text weight="semibold">156 devices commissioned</Text>
+      <Text size="small" tone="secondary">
+        Cameras, doors, and sensors are live in Command — not yet placed on a floorplan.
+      </Text>
+      <Divider />
+      <Text size="small" tone="tertiary" style={{ fontSize: 10, textTransform: "uppercase" }}>
+        Quick links
+      </Text>
+      <PanelListRow label="Search devices" onClick={() => setState({ searchFocused: true })} />
+      <PanelListRow label="Recent alerts" trailing="2" />
+    </Stack>
+  );
+}
+
+function getOrgSiteById(id: string): MockOrgSite | undefined {
+  return ORG_SITES.find((s) => s.id === id);
+}
+
+function openDrawDevicesPanel(setState: (patch: Partial<AppState>) => void) {
+  setState({ editorRightTab: "devices", stampActive: false });
+}
+
+function DrawDevicesList({
+  siteIds,
+  onPlaceDevice,
+}: {
+  siteIds: string[];
+  onPlaceDevice: (device: MockUnplacedDevice) => void;
+}) {
+  const theme = useHostTheme();
+  const activeSiteIds = siteIds.length > 0 ? siteIds : ORG_SITES.map((s) => s.id);
+  const sites = ORG_SITES.filter((s) => activeSiteIds.includes(s.id));
+
+  return (
+    <Stack gap={12}>
+      <Text size="small" tone="secondary">
+        Commissioned devices not yet placed on this floor — grouped by site and device family.
+      </Text>
+      {sites.map((site) => {
+        const siteDevices = UNPLACED_DEVICES.filter((d) => d.siteId === site.id);
+        if (siteDevices.length === 0) return null;
+        return (
+          <Stack key={site.id} gap={8}>
+            <Stack gap={2}>
+              <Text size="small" weight="semibold">
+                {site.name}
+              </Text>
+              <Text size="small" tone="tertiary" style={{ fontSize: 10 }}>
+                {site.code}
+              </Text>
+            </Stack>
+            {UNPLACED_DEVICE_FAMILIES.map((family) => {
+              const familyDevices = siteDevices.filter((d) => d.family === family);
+              if (familyDevices.length === 0) return null;
+              return (
+                <Stack key={family} gap={4}>
+                  <Text size="small" tone="tertiary" style={{ fontSize: 10, textTransform: "uppercase" }}>
+                    {family} ({familyDevices.length})
+                  </Text>
+                  {familyDevices.map((d) => (
+                    <WireBox key={d.id} style={{ padding: 8 }}>
+                      <Text size="small" weight="semibold">
+                        {d.label}
+                      </Text>
+                      <Text size="small" tone="tertiary">
+                        {d.model} · {d.family}
+                      </Text>
+                      <Button
+                        variant="secondary"
+                        style={{ marginTop: 6, fontSize: 10 }}
+                        onClick={() => onPlaceDevice(d)}
+                      >
+                        Place on map
+                      </Button>
+                    </WireBox>
+                  ))}
+                </Stack>
+              );
+            })}
+            <div style={{ height: 1, background: theme.stroke.tertiary, marginTop: 4 }} />
+          </Stack>
+        );
+      })}
+    </Stack>
+  );
 }
 
 function EditorRightPanel({
   state,
   setState,
 }: {
-  state: AppState
-  setState: (patch: Partial<AppState>) => void
+  state: AppState;
+  setState: (patch: Partial<AppState>) => void;
 }) {
-  const selectedMarker = MARKERS.find((m) => m.id === state.selectedMarkerId) ?? null
+  const theme = useHostTheme();
+  const selectedMarker = MARKERS.find((m) => m.id === state.selectedMarkerId) ?? null;
 
   const selectTool = (tool: EditorTool) => {
     setState({
@@ -419,221 +1060,244 @@ function EditorRightPanel({
       stampActive: tool === "Camera" || tool === "Sensor",
       selectedMarkerId: tool === "Select" ? state.selectedMarkerId : null,
       showFovCones: tool === "Camera" && !!state.selectedMarkerId,
-    })
-  }
+    });
+  };
+
+  const placeDevice = (device: MockUnplacedDevice) => {
+    const tool: EditorTool = device.family === "Sensors" ? "Sensor" : "Camera";
+    setState({
+      editorTool: tool,
+      editorRightTab: "devices",
+      stampActive: true,
+      selectedMarkerId: null,
+    });
+  };
 
   return (
-    <div className="flex h-full flex-col overflow-hidden">
-      <div className="flex border-b border-border/50">
+    <Stack gap={0} style={{ height: "100%", overflow: "hidden" }}>
+      <Row gap={0} style={{ borderBottom: `1px solid ${theme.stroke.tertiary}` }}>
         {(["tools", "devices", "properties"] as EditorRightTab[]).map((tab) => (
-          <button
+          <Button
             key={tab}
-            type="button"
+            variant={state.editorRightTab === tab ? "primary" : "ghost"}
             onClick={() => setState({ editorRightTab: tab })}
-            className={cn(
-              "flex-1 px-2 py-2 text-[10px] capitalize transition-colors",
-              state.editorRightTab === tab
-                ? "bg-sky-500/10 text-sky-300 border-b-2 border-sky-500/50"
-                : "text-muted-foreground hover:text-foreground",
-            )}
+            style={{ fontSize: 10, textTransform: "capitalize", flex: 1 }}
           >
             {tab}
-          </button>
+          </Button>
         ))}
-      </div>
-      <div className="flex-1 space-y-2.5 overflow-auto p-3">
-        {state.editorRightTab === "tools" && (
+      </Row>
+      <Stack gap={10} style={{ padding: 12, overflow: "auto", flex: 1 }}>
+        {state.editorRightTab === "tools" ? (
           <>
-            <button
-              type="button"
-              className={cn(btnClass(state.editorTool === "Select" ? "primary" : "secondary"), "w-full text-left")}
+            <Button
+              variant={state.editorTool === "Select" ? "primary" : "secondary"}
               onClick={() => selectTool("Select")}
+              style={{ width: "100%", justifyContent: "flex-start" }}
             >
               Select
-            </button>
+            </Button>
             {EDITOR_TOOL_GROUPS.map((group) => (
-              <div key={group.label} className="space-y-1.5">
-                <div className="text-[10px] uppercase text-muted-foreground">{group.label}</div>
+              <Stack key={group.label} gap={6}>
+                <Text size="small" tone="tertiary" style={{ fontSize: 10, textTransform: "uppercase" }}>
+                  {group.label}
+                </Text>
                 {group.tools.map((tool) => (
-                  <button
+                  <Button
                     key={tool}
-                    type="button"
-                    className={cn(btnClass(state.editorTool === tool ? "primary" : "ghost"), "w-full text-left text-[11px]")}
+                    variant={state.editorTool === tool ? "primary" : "ghost"}
                     onClick={() => selectTool(tool)}
+                    style={{ width: "100%", justifyContent: "flex-start", fontSize: 11 }}
                   >
                     {tool}
-                  </button>
+                  </Button>
                 ))}
-              </div>
+              </Stack>
             ))}
           </>
-        )}
+        ) : null}
 
-        {state.editorRightTab === "devices" && (
-          <>
-            <p className="text-xs text-muted-foreground">Commissioned devices not yet placed on this floor.</p>
-            {UNPLACED_DEVICES.map((d) => (
-              <WireBox key={d.id} className="space-y-1 p-2">
-                <div className="text-xs font-semibold">{d.label}</div>
-                <div className="text-[10px] text-muted-foreground">{d.family} · {d.site}</div>
-                <button
-                  type="button"
-                  className={cn(btnClass("secondary"), "mt-1.5")}
-                  onClick={() => setState({ editorTool: "Camera", stampActive: true, editorRightTab: "devices" })}
-                >
-                  Place on map
-                </button>
-              </WireBox>
-            ))}
-          </>
-        )}
+        {state.editorRightTab === "devices" ? (
+          <DrawDevicesList siteIds={state.selectedSiteIds ?? []} onPlaceDevice={placeDevice} />
+        ) : null}
 
-        {state.editorRightTab === "properties" && (
+        {state.editorRightTab === "properties" ? (
           <>
             {selectedMarker ? (
               <>
-                <div className="text-sm font-semibold">{selectedMarker.label}</div>
+                <Text weight="semibold">{selectedMarker.label}</Text>
                 <Chip label={selectedMarker.model} />
-                {state.showFovCones && (
+                {state.showFovCones ? (
                   <>
-                    <div className="text-[10px] uppercase text-muted-foreground">FOV</div>
-                    <div className="flex justify-between text-xs">
-                      <span className="text-muted-foreground">Bearing</span>
-                      <span>127°</span>
-                    </div>
-                    <div className="flex justify-between text-xs">
-                      <span className="text-muted-foreground">Range</span>
-                      <span>18 ft</span>
-                    </div>
-                    <button type="button" className={btnClass("secondary")}>Reset to model default</button>
+                    <Text size="small" tone="tertiary" style={{ fontSize: 10, textTransform: "uppercase" }}>
+                      FOV
+                    </Text>
+                    <Row justify="space-between">
+                      <Text size="small" tone="secondary">
+                        Bearing
+                      </Text>
+                      <Text size="small">127°</Text>
+                    </Row>
+                    <Row justify="space-between">
+                      <Text size="small" tone="secondary">
+                        Range
+                      </Text>
+                      <Text size="small">18 ft</Text>
+                    </Row>
+                    <Button variant="secondary">Reset to model default</Button>
                   </>
-                )}
-                <button type="button" className={btnClass("ghost")}>Delete marker</button>
+                ) : null}
+                <Button variant="ghost">Delete marker</Button>
               </>
             ) : (
               <>
-                <div className="text-sm font-semibold">{state.editorTool} properties</div>
-                {state.editorTool === "Wall" && (
+                <Text weight="semibold">{state.editorTool} properties</Text>
+                {state.editorTool === "Wall" ? (
                   <>
-                    <div className="flex justify-between text-xs">
-                      <span className="text-muted-foreground">Snap to grid</span>
-                      <span>On</span>
-                    </div>
-                    <div className="flex justify-between text-xs">
-                      <span className="text-muted-foreground">Thickness</span>
-                      <span>6 in</span>
-                    </div>
-                    <p className="text-xs text-muted-foreground">Click to add points. Double-click to finish segment.</p>
+                    <Row justify="space-between">
+                      <Text size="small" tone="secondary">
+                        Snap to grid
+                      </Text>
+                      <Text size="small">On</Text>
+                    </Row>
+                    <Row justify="space-between">
+                      <Text size="small" tone="secondary">
+                        Thickness
+                      </Text>
+                      <Text size="small">6 in</Text>
+                    </Row>
+                    <Text size="small" tone="secondary">
+                      Click to add points. Double-click to finish segment.
+                    </Text>
                   </>
-                )}
-                {state.editorTool === "Door" && (
+                ) : null}
+                {state.editorTool === "Door" ? (
                   <>
-                    <div className="flex justify-between text-xs">
-                      <span className="text-muted-foreground">Width</span>
-                      <span>36 in</span>
-                    </div>
-                    <div className="flex justify-between text-xs">
-                      <span className="text-muted-foreground">Swing</span>
-                      <span>Left-in</span>
-                    </div>
+                    <Row justify="space-between">
+                      <Text size="small" tone="secondary">
+                        Width
+                      </Text>
+                      <Text size="small">36 in</Text>
+                    </Row>
+                    <Row justify="space-between">
+                      <Text size="small" tone="secondary">
+                        Swing
+                      </Text>
+                      <Text size="small">Left-in</Text>
+                    </Row>
                   </>
-                )}
-                {state.editorTool === "Cable" && (
-                  <p className="text-xs text-muted-foreground">
+                ) : null}
+                {state.editorTool === "Cable" ? (
+                  <Text size="small" tone="secondary">
                     Draw path between device endpoints. Autosnap highlights valid targets within 2m.
-                  </p>
-                )}
-                {state.editorTool === "Ruler" && (
-                  <div className="flex justify-between text-xs">
-                    <span className="text-muted-foreground">Last measure</span>
-                    <span>24 ft 6 in</span>
-                  </div>
-                )}
-                {state.editorTool === "Area" && (
+                  </Text>
+                ) : null}
+                {state.editorTool === "Ruler" ? (
+                  <Row justify="space-between">
+                    <Text size="small" tone="secondary">
+                      Last measure
+                    </Text>
+                    <Text size="small">24 ft 6 in</Text>
+                  </Row>
+                ) : null}
+                {state.editorTool === "Area" ? (
                   <>
-                    <div className="flex justify-between text-xs">
-                      <span className="text-muted-foreground">Name</span>
-                      <span>Lobby</span>
-                    </div>
-                    <p className="text-xs text-muted-foreground">Click vertices to define polygon. Esc to cancel.</p>
+                    <Row justify="space-between">
+                      <Text size="small" tone="secondary">
+                        Name
+                      </Text>
+                      <Text size="small">Lobby</Text>
+                    </Row>
+                    <Text size="small" tone="secondary">
+                      Click vertices to define polygon. Esc to cancel.
+                    </Text>
                   </>
-                )}
-                {state.editorTool === "Label" && (
-                  <p className="text-xs text-muted-foreground">Click to place text annotation. Classify as room, entry, or exit.</p>
-                )}
-                {state.editorTool === "Select" && (
-                  <p className="text-xs text-muted-foreground">Select a marker or structural element on the canvas to edit properties.</p>
-                )}
+                ) : null}
+                {state.editorTool === "Label" ? (
+                  <Text size="small" tone="secondary">
+                    Click to place text annotation. Classify as room, entry, or exit.
+                  </Text>
+                ) : null}
+                {state.editorTool === "Select" ? (
+                  <Text size="small" tone="secondary">
+                    Select a marker or structural element on the canvas to edit properties.
+                  </Text>
+                ) : null}
               </>
             )}
           </>
-        )}
-      </div>
-    </div>
-  )
+        ) : null}
+      </Stack>
+    </Stack>
+  );
 }
 
 function EditorCanvasOverlays({ state }: { state: AppState }) {
-  if (!state.editorMode) return null
+  const theme = useHostTheme();
+  if (!state.editorMode) return null;
 
   return (
-    <svg width="100%" height="100%" className="pointer-events-none absolute inset-0">
-      {(state.editorTool === "Wall" || state.editorTool === "Door") && (
+    <svg width="100%" height="100%" style={{ position: "absolute", inset: 0, pointerEvents: "none" }}>
+      {state.editorTool === "Wall" || state.editorTool === "Door" ? (
         <>
-          <polyline points="28%,38% 42%,38% 42%,52% 58%,52%" fill="none" stroke="oklch(0.7 0.15 230)" strokeWidth="2" />
-          {state.editorTool === "Door" && (
-            <path d="M 42% 52% A 4% 4% 0 0 1 46% 48%" fill="none" stroke="oklch(0.65 0.02 230)" strokeWidth="1.5" />
-          )}
+          <polyline
+            points="28%,38% 42%,38% 42%,52% 58%,52%"
+            fill="none"
+            stroke={theme.accent.primary}
+            strokeWidth="2"
+          />
+          {state.editorTool === "Door" ? (
+            <path d="M 42% 52% A 4% 4% 0 0 1 46% 48%" fill="none" stroke={theme.text.secondary} strokeWidth="1.5" />
+          ) : null}
         </>
-      )}
-      {state.editorTool === "Cable" && (
+      ) : null}
+      {state.editorTool === "Cable" ? (
         <polyline
           points="55%,35% 62%,45% 58%,68% 70%,72%"
           fill="none"
-          stroke="oklch(0.75 0.12 200)"
+          stroke={theme.text.link}
           strokeWidth="1.5"
           strokeDasharray="4 3"
         />
-      )}
-      {state.editorTool === "Ruler" && (
+      ) : null}
+      {state.editorTool === "Ruler" ? (
         <>
-          <line x1="30%" y1="60%" x2="48%" y2="60%" stroke="oklch(0.65 0.02 230)" strokeWidth="1.5" />
-          <text x="39%" y="58%" fill="oklch(0.55 0.02 230)" fontSize="10">24 ft</text>
+          <line x1="30%" y1="60%" x2="48%" y2="60%" stroke={theme.text.secondary} strokeWidth="1.5" />
+          <text x="39%" y="58%" fill={theme.text.tertiary} fontSize="10">
+            24 ft
+          </text>
         </>
-      )}
-      {state.editorTool === "Area" && (
+      ) : null}
+      {state.editorTool === "Area" ? (
         <polygon
           points="48%,30% 68%,30% 72%,48% 52%,55%"
-          fill="oklch(0.35 0.02 230 / 0.5)"
-          stroke="oklch(0.7 0.15 230)"
+          fill={theme.fill.tertiary}
+          stroke={theme.accent.primary}
           strokeWidth="1.5"
           opacity="0.5"
         />
-      )}
-      {state.showFovCones && state.selectedMarkerId === "cam-lobby-01" && (
-        <polygon
-          points="55%,35% 62%,28% 68%,42%"
-          fill="oklch(0.7 0.15 230 / 0.15)"
-          stroke="oklch(0.7 0.15 230)"
-        />
-      )}
-      {state.stampActive && (
-        <text x="50%" y="50%" fill="oklch(0.55 0.02 230)" fontSize="11" textAnchor="middle">
+      ) : null}
+      {state.showFovCones && state.selectedMarkerId === "cam-lobby-01" ? (
+        <polygon points="55%,35% 62%,28% 68%,42%" fill={theme.accent.primary} opacity="0.15" stroke={theme.accent.primary} />
+      ) : null}
+      {state.stampActive ? (
+        <text x="50%" y="50%" fill={theme.text.tertiary} fontSize="11" textAnchor="middle">
           Click to place {state.editorTool.toLowerCase()}
         </text>
-      )}
+      ) : null}
     </svg>
-  )
+  );
 }
 
 function LeftPanelContent({
   state,
   setState,
 }: {
-  state: AppState
-  setState: (patch: Partial<AppState>) => void
+  state: AppState;
+  setState: (patch: Partial<AppState>) => void;
 }) {
-  const selectedPlace = LOCATIONS.find((l) => l.id === state.selectedPlaceId) ?? null
+  const theme = useHostTheme();
+  const selectedPlace = LOCATIONS.find((l) => l.id === state.selectedPlaceId) ?? null;
 
   const goToPlace = useCallback(
     (loc: MockLocation) => {
@@ -647,69 +1311,95 @@ function LeftPanelContent({
         selectedMarkerId: null,
         rail: "map",
         filesFlyoutOpen: false,
-      })
+      });
     },
     [setState],
-  )
+  );
 
   if (state.searchFocused) {
-    const q = state.searchQuery.toLowerCase()
-    const matchedPlaces = q ? LOCATIONS.filter((l) => l.label.toLowerCase().includes(q)) : []
-    const matchedDevices = q ? MARKERS.filter((m) => m.label.toLowerCase().includes(q)) : []
+    const q = state.searchQuery.toLowerCase();
+    const matchedPlaces = q ? LOCATIONS.filter((l) => l.label.toLowerCase().includes(q)) : [];
+    const matchedDevices = q ? MARKERS.filter((m) => m.label.toLowerCase().includes(q)) : [];
     return (
-      <div className="h-full overflow-auto">
+      <Stack gap={0} style={{ height: "100%", overflow: "auto" }}>
         {!q ? (
           <>
-            <div className="px-3 py-2 text-[10px] uppercase text-muted-foreground">Recent</div>
+            <Text size="small" tone="tertiary" style={{ padding: "8px 12px", fontSize: 10, textTransform: "uppercase" }}>
+              Recent
+            </Text>
             {LOCATIONS.slice(0, 2).map((loc) => (
               <PanelListRow key={loc.id} label={loc.label} onClick={() => goToPlace(loc)} />
             ))}
-            <div className="my-1 border-t border-border/50" />
-            <div className="px-3 py-2 text-[10px] uppercase text-muted-foreground">Places</div>
+            <Divider />
+            <Text size="small" tone="tertiary" style={{ padding: "8px 12px", fontSize: 10, textTransform: "uppercase" }}>
+              Places
+            </Text>
             {LOCATIONS.slice(2).map((loc) => (
               <PanelListRow key={loc.id} label={`${loc.label} · ${loc.kind}`} onClick={() => goToPlace(loc)} />
             ))}
-            <div className="my-1 border-t border-border/50" />
-            <div className="px-3 py-2 text-[10px] uppercase text-muted-foreground">Devices</div>
+            <Divider />
+            <Text size="small" tone="tertiary" style={{ padding: "8px 12px", fontSize: 10, textTransform: "uppercase" }}>
+              Devices
+            </Text>
             {MARKERS.slice(0, 2).map((m) => (
               <PanelListRow key={m.id} label={`${m.label} · ${m.kind}`} />
             ))}
           </>
         ) : matchedPlaces.length === 0 && matchedDevices.length === 0 ? (
-          <p className="p-3 text-xs text-muted-foreground">No results for &quot;{state.searchQuery}&quot;</p>
+          <Text size="small" tone="secondary" style={{ padding: 12 }}>
+            No results for &quot;{state.searchQuery}&quot;
+          </Text>
         ) : (
           <>
-            {matchedPlaces.length > 0 && (
+            {matchedPlaces.length > 0 ? (
               <>
-                <div className="px-3 py-2 text-[10px] uppercase text-muted-foreground">Places</div>
+                <Text size="small" tone="tertiary" style={{ padding: "8px 12px", fontSize: 10, textTransform: "uppercase" }}>
+                  Places
+                </Text>
                 {matchedPlaces.map((loc) => (
                   <PanelListRow key={loc.id} label={loc.label} onClick={() => goToPlace(loc)} />
                 ))}
               </>
-            )}
-            {matchedDevices.length > 0 && (
+            ) : null}
+            {matchedDevices.length > 0 ? (
               <>
-                <div className="px-3 py-2 text-[10px] uppercase text-muted-foreground">Devices</div>
+                <Text size="small" tone="tertiary" style={{ padding: "8px 12px", fontSize: 10, textTransform: "uppercase" }}>
+                  Devices
+                </Text>
                 {matchedDevices.map((m) => (
                   <PanelListRow key={m.id} label={m.label} trailing={m.kind} />
                 ))}
               </>
-            )}
+            ) : null}
           </>
         )}
-      </div>
-    )
+      </Stack>
+    );
+  }
+
+  if (
+    !state.orgHasFloorplans &&
+    !state.editorMode &&
+    state.rail === "map" &&
+    !state.searchFocused &&
+    !state.selectedPlaceId
+  ) {
+    return <FirstVisitLeftPanel setState={setState} />;
   }
 
   if (state.editorMode && !state.searchFocused) {
-    const place = selectedPlace ?? LOCATIONS.find((l) => l.id === "floor-3")!
+    const place = selectedPlace ?? LOCATIONS.find((l) => l.id === "floor-3")!;
     return (
-      <div className="flex h-full flex-col gap-2 overflow-auto p-3">
-        <div className="text-xs text-muted-foreground">Org › HQ Campus › Main Bldg › {place.label}</div>
-        <div className="text-sm font-semibold">{place.label}</div>
+      <Stack gap={8} style={{ padding: 12, overflow: "auto", height: "100%" }}>
+        <Text size="small" tone="tertiary">
+          Org › HQ Campus › Main Bldg › {place.label}
+        </Text>
+        <Text weight="semibold">{place.label}</Text>
         <Chip label="Editing" tone="accent" />
-        <div className="border-t border-border/50" />
-        <div className="text-[10px] uppercase text-muted-foreground">On this floor</div>
+        <Divider />
+        <Text size="small" tone="tertiary" style={{ fontSize: 10, textTransform: "uppercase" }}>
+          On this floor
+        </Text>
         {MARKERS.map((m) => (
           <PanelListRow
             key={m.id}
@@ -725,16 +1415,23 @@ function LeftPanelContent({
             }
           />
         ))}
-        <div className="border-t border-border/50" />
-        <div className="text-[10px] uppercase text-muted-foreground">Unplaced ({UNPLACED_DEVICES.length})</div>
-        {UNPLACED_DEVICES.slice(0, 2).map((d) => (
-          <div key={d.id} className="text-xs text-muted-foreground">{d.label}</div>
-        ))}
-        <button type="button" className={btnClass("secondary")} onClick={() => setState({ editorRightTab: "devices" })}>
-          Open device search
-        </button>
-      </div>
-    )
+        <Divider />
+        <Text size="small" tone="tertiary" style={{ fontSize: 10, textTransform: "uppercase" }}>
+          Unplaced ({UNPLACED_DEVICES.length})
+        </Text>
+        {UNPLACED_DEVICES.slice(0, 2).map((d) => {
+          const site = getOrgSiteById(d.siteId);
+          return (
+            <Text key={d.id} size="small" tone="secondary">
+              {d.label} · {site?.code ?? d.siteId}
+            </Text>
+          );
+        })}
+        <Button variant="secondary" onClick={() => openDrawDevicesPanel(setState)}>
+          Draw Devices
+        </Button>
+      </Stack>
+    );
   }
 
   if (selectedPlace) {
@@ -743,26 +1440,25 @@ function LeftPanelContent({
         ? "Org › HQ Campus › Main Bldg"
         : selectedPlace.kind === "building"
           ? "Org › HQ Campus"
-          : "Org"
+          : "Org";
     return (
-      <div className="flex h-full flex-col overflow-hidden">
-        <div className="shrink-0 space-y-2 border-b border-border/50 p-3">
-          <button type="button" className={btnClass("ghost")} onClick={() => setState({ selectedPlaceId: null })}>
+      <Stack gap={0} style={{ height: "100%", overflow: "hidden" }}>
+        <Stack gap={8} style={{ padding: 12, borderBottom: `1px solid ${theme.stroke.tertiary}` }}>
+          <Button variant="ghost" onClick={() => setState({ selectedPlaceId: null })}>
             {breadcrumb}
-          </button>
-          <div className="text-sm font-semibold">{selectedPlace.label}</div>
-          <div className="flex flex-wrap gap-1.5">
+          </Button>
+          <Text weight="semibold">{selectedPlace.label}</Text>
+          <Row gap={6} wrap>
             <Chip label={selectedPlace.kind} tone="accent" />
             <Chip label={selectedPlace.site} />
             <Chip
               label={`${selectedPlace.online}/${selectedPlace.total} online`}
               tone={selectedPlace.online === selectedPlace.total ? "success" : "warning"}
             />
-          </div>
-          <div className="flex flex-wrap gap-1.5">
-            <button
-              type="button"
-              className={btnClass("primary")}
+          </Row>
+          <Row gap={6} wrap>
+            <Button
+              variant="primary"
               onClick={() =>
                 setState({
                   editorMode: true,
@@ -774,87 +1470,121 @@ function LeftPanelContent({
               }
             >
               Open in Editor
-            </button>
+            </Button>
             {["Add to Collection", "Share", "Permissions", "Nearby"].map((a) => (
-              <button key={a} type="button" className={btnClass("secondary")}>{a}</button>
+              <Button key={a} variant="secondary">
+                {a}
+              </Button>
             ))}
-          </div>
-        </div>
-        <div className="flex shrink-0 border-b border-border/50">
+          </Row>
+        </Stack>
+        <Row gap={0} style={{ borderBottom: `1px solid ${theme.stroke.tertiary}` }}>
           {PLACE_TABS.map((t) => (
-            <button
+            <Button
               key={t}
-              type="button"
+              variant={state.placeTab === t ? "primary" : "ghost"}
               onClick={() => setState({ placeTab: t })}
-              className={cn(
-                "px-3 py-2 text-[10px] capitalize transition-colors",
-                state.placeTab === t
-                  ? "text-foreground border-b-2 border-primary"
-                  : "text-muted-foreground hover:text-foreground",
-              )}
+              style={{ fontSize: 10, textTransform: "capitalize" }}
             >
               {t}
-            </button>
+            </Button>
           ))}
-        </div>
-        <div className="flex-1 space-y-2 overflow-auto p-3 text-xs">
-          {state.placeTab === "overview" && (
+        </Row>
+        <Stack gap={8} style={{ padding: 12, overflow: "auto", flex: 1 }}>
+          {state.placeTab === "overview" ? (
             <>
-              <div className="text-[10px] uppercase text-muted-foreground">Marker counts</div>
-              {[["Cameras", "24"], ["Doors", "12"], ["Sensors", "6"]].map(([l, n]) => (
-                <div key={l} className="flex justify-between">
-                  <span className="text-muted-foreground">{l}</span>
-                  <span>{n}</span>
-                </div>
+              <Text size="small" tone="tertiary" style={{ fontSize: 10, textTransform: "uppercase" }}>
+                Marker counts
+              </Text>
+              {[
+                ["Cameras", "24"],
+                ["Doors", "12"],
+                ["Sensors", "6"],
+              ].map(([l, n]) => (
+                <Row key={l} justify="space-between">
+                  <Text size="small" tone="secondary">
+                    {l}
+                  </Text>
+                  <Text size="small">{n}</Text>
+                </Row>
               ))}
-              <div className="border-t border-border/30 pt-2">
-                <div className="text-[10px] uppercase text-muted-foreground">Linked files</div>
-                <div className="text-muted-foreground">Floor-3-Layout-v2.pdf · Jan 14</div>
-                {!state.filesFlyoutOpen && (
-                  <div className="text-muted-foreground/70">Drag a floorplan onto the map, or open Files to upload.</div>
-                )}
-              </div>
+              <Divider />
+              <Text size="small" tone="tertiary" style={{ fontSize: 10, textTransform: "uppercase" }}>
+                Linked files
+              </Text>
+              <Text size="small" tone="secondary">
+                Floor-3-Layout-v2.pdf · Jan 14
+              </Text>
+              {!state.filesFlyoutOpen ? (
+                <Text size="small" tone="tertiary">
+                  Drag a floorplan onto the map, or open Files to upload.
+                </Text>
+              ) : null}
             </>
-          )}
-          {state.placeTab === "markers" &&
-            MARKERS.map((m) => (
-              <PanelListRow
-                key={m.id}
-                label={m.label}
-                trailing={m.kind}
-                onClick={() => setState({ editorMode: true, editorTool: "Select", selectedMarkerId: m.id })}
-              />
-            ))}
-          {state.placeTab === "activity" &&
-            [
-              "Motion detected · Cam-NE-01 · 2m ago",
-              "Door propped · Door-007 · 14m ago",
-              "Cam-SW-04 went offline · 1h ago",
-              "Marker placed on Floor 3 · 3h ago",
-            ].map((e) => (
-              <div key={e} className="text-muted-foreground">{e}</div>
-            ))}
-          {state.placeTab === "about" &&
-            [
-              ["Site", selectedPlace.site],
-              ["Kind", selectedPlace.kind],
-              ["Parent", selectedPlace.kind === "floor" ? "Main Building" : "HQ Campus"],
-              ["Online", `${selectedPlace.online} / ${selectedPlace.total}`],
-            ].map(([k, v]) => (
-              <div key={k} className="flex justify-between">
-                <span className="text-muted-foreground">{k}</span>
-                <span>{v}</span>
-              </div>
-            ))}
-        </div>
-      </div>
-    )
+          ) : null}
+          {state.placeTab === "markers"
+            ? MARKERS.map((m) => (
+                <PanelListRow
+                  key={m.id}
+                  label={m.label}
+                  trailing={m.kind}
+                  onClick={() =>
+                    setState({ editorMode: true, editorTool: "Select", selectedMarkerId: m.id })
+                  }
+                />
+              ))
+            : null}
+          {state.placeTab === "activity"
+            ? [
+                "Motion detected · Cam-NE-01 · 2m ago",
+                "Door propped · Door-007 · 14m ago",
+                "Cam-SW-04 went offline · 1h ago",
+                "Marker placed on Floor 3 · 3h ago",
+              ].map((e) => (
+                <Text key={e} size="small" tone="secondary">
+                  {e}
+                </Text>
+              ))
+            : null}
+          {state.placeTab === "about"
+            ? [
+                ["Site", selectedPlace.site],
+                ["Kind", selectedPlace.kind],
+                ["Parent", selectedPlace.kind === "floor" ? "Main Building" : "HQ Campus"],
+                ["Online", `${selectedPlace.online} / ${selectedPlace.total}`],
+              ].map(([k, v]) => (
+                <Row key={k} justify="space-between">
+                  <Text size="small" tone="secondary">
+                    {k}
+                  </Text>
+                  <Text size="small">{v}</Text>
+                </Row>
+              ))
+            : null}
+        </Stack>
+      </Stack>
+    );
   }
 
   if (state.rail === "locations") {
+    if (!state.orgHasFloorplans) {
+      return (
+        <Stack gap={8} style={{ padding: 12, overflow: "auto" }}>
+          <Text weight="semibold">All Locations</Text>
+          <Text size="small" tone="secondary">
+            Upload a floorplan to create your first building and floor. Devices will appear here once placed.
+          </Text>
+          <Button variant="secondary" onClick={() => setState({ filesFlyoutOpen: true })}>
+            Upload floorplan
+          </Button>
+        </Stack>
+      );
+    }
     return (
-      <div className="overflow-auto p-2">
-        <div className="px-2 py-1 text-[10px] uppercase text-muted-foreground">All Locations</div>
+      <Stack gap={0} style={{ padding: 8, overflow: "auto" }}>
+        <Text size="small" tone="tertiary" style={{ padding: "4px 8px", fontSize: 10, textTransform: "uppercase" }}>
+          All Locations
+        </Text>
         {LOCATIONS.map((loc) => (
           <PanelListRow
             key={loc.id}
@@ -864,8 +1594,8 @@ function LeftPanelContent({
             onClick={() => goToPlace(loc)}
           />
         ))}
-      </div>
-    )
+      </Stack>
+    );
   }
 
   if (state.rail === "collections") {
@@ -874,32 +1604,21 @@ function LeftPanelContent({
         ? COLLECTIONS.filter((c) => c.owned)
         : state.collTab === "shared"
           ? COLLECTIONS.filter((c) => c.shared)
-          : []
+          : [];
     return (
-      <div className="space-y-2 overflow-auto p-3">
-        <div className="text-sm font-semibold">Collections</div>
-        <div className="flex flex-wrap gap-1.5">
+      <Stack gap={8} style={{ padding: 12, overflow: "auto" }}>
+        <Text weight="semibold">Collections</Text>
+        <Row gap={6} wrap>
           {(["mine", "shared", "following"] as CollTab[]).map((f) => (
-            <button
-              key={f}
-              type="button"
-              onClick={() => setState({ collTab: f })}
-              className={cn(
-                "rounded-full border px-2.5 py-0.5 text-[10px] transition-colors",
-                state.collTab === f
-                  ? "bg-foreground text-background border-foreground"
-                  : "border-border text-muted-foreground hover:border-foreground/40",
-              )}
-            >
+            <Pill key={f} active={state.collTab === f} onClick={() => setState({ collTab: f })} size="sm">
               {f === "mine" ? "My Collections" : f === "shared" ? "Shared with me" : "Following"}
-            </button>
+            </Pill>
           ))}
-        </div>
+        </Row>
         {filtered.map((col) => (
-          <div key={col.id} className="space-y-1">
-            <button
-              type="button"
-              className={btnClass("ghost", "w-full text-left")}
+          <Stack key={col.id} gap={4}>
+            <Button
+              variant="ghost"
               onClick={() =>
                 setState({
                   expandedCollectionId: state.expandedCollectionId === col.id ? null : col.id,
@@ -907,83 +1626,1071 @@ function LeftPanelContent({
               }
             >
               {col.label} ({col.count})
-            </button>
-            {state.expandedCollectionId === col.id &&
-              Array.from({ length: Math.min(3, col.count) }, (_, i) => (
-                <div key={i} className="pl-3 text-[10px] text-muted-foreground">
-                  Camera {i + 1} · Online
-                </div>
-              ))}
-          </div>
+            </Button>
+            {state.expandedCollectionId === col.id
+              ? Array.from({ length: Math.min(3, col.count) }, (_, i) => (
+                  <Text key={i} size="small" tone="secondary" style={{ paddingLeft: 12 }}>
+                    Camera {i + 1} · Online
+                  </Text>
+                ))
+              : null}
+          </Stack>
         ))}
-      </div>
-    )
+      </Stack>
+    );
   }
 
   if (state.rail === "layers") {
     return (
-      <div className="space-y-3 overflow-auto p-3">
-        <div className="text-sm font-semibold">Data Layers</div>
+      <Stack gap={12} style={{ padding: 12, overflow: "auto" }}>
+        <Text weight="semibold">Data Layers</Text>
         {Object.entries(LAYER_GROUPS).map(([group, layers]) => (
-          <div key={group} className="space-y-1">
-            <div className="text-[10px] uppercase text-muted-foreground">{group}</div>
+          <Stack key={group} gap={4}>
+            <Text size="small" tone="tertiary" style={{ fontSize: 10, textTransform: "uppercase" }}>
+              {group}
+            </Text>
             {layers.map((layer) => {
-              const active = state.activeLayers.includes(layer)
+              const active = state.activeLayers.includes(layer);
               return (
-                <button
+                <Button
                   key={layer}
-                  type="button"
-                  className={cn(
-                    btnClass(active ? "primary" : "ghost"),
-                    "w-full justify-start text-left",
-                  )}
+                  variant={active ? "primary" : "ghost"}
                   onClick={() => {
                     const next = active
                       ? state.activeLayers.filter((l) => l !== layer)
-                      : [...state.activeLayers, layer]
-                    setState({ activeLayers: next })
+                      : [...state.activeLayers, layer];
+                    setState({ activeLayers: next });
                   }}
+                  style={{ justifyContent: "flex-start", width: "100%" }}
                 >
                   {active ? "[x]" : "[ ]"} {layer}
-                </button>
-              )
+                </Button>
+              );
             })}
-          </div>
+          </Stack>
         ))}
-      </div>
-    )
+      </Stack>
+    );
   }
 
   if (state.rail === "recents") {
+    if (!state.orgHasFloorplans) {
+      return (
+        <Stack gap={8} style={{ padding: 12, overflow: "auto" }}>
+          <Text weight="semibold">Recently Viewed</Text>
+          <Text size="small" tone="secondary">
+            Places you open will appear here after your first building exists.
+          </Text>
+        </Stack>
+      );
+    }
     return (
-      <div className="overflow-auto p-3">
-        <div className="mb-2 text-sm font-semibold">Recently Viewed</div>
+      <Stack gap={0} style={{ padding: 12, overflow: "auto" }}>
+        <Text weight="semibold">Recently Viewed</Text>
         {LOCATIONS.map((loc) => (
           <PanelListRow key={loc.id} label={loc.label} onClick={() => goToPlace(loc)} />
         ))}
-      </div>
-    )
+      </Stack>
+    );
   }
 
   return (
-    <div className="space-y-2 overflow-auto p-3">
-      <div className="text-[10px] uppercase text-muted-foreground">Active alerts</div>
-      <Callout variant="warning" title="No active emergencies">
+    <Stack gap={8} style={{ padding: 12, overflow: "auto" }}>
+      <Text size="small" tone="tertiary" style={{ fontSize: 10, textTransform: "uppercase" }}>
+        Active alerts
+      </Text>
+      <Callout tone="warning" title="No active emergencies">
         Showing alerts scoped to HQ-MAIN.
       </Callout>
       {[
         "Door forced open · HQ › Floor 2 › Lobby · 3 min",
         "After-hours motion · Warehouse A › Dock 4 · 17 min",
       ].map((e) => (
-        <div key={e} className="text-xs text-muted-foreground">{e}</div>
+        <Text key={e} size="small" tone="secondary">
+          {e}
+        </Text>
       ))}
-      <div className="border-t border-border/50" />
-      <div className="text-[10px] uppercase text-muted-foreground">Recents</div>
+      <Divider />
+      <Text size="small" tone="tertiary" style={{ fontSize: 10, textTransform: "uppercase" }}>
+        Recents
+      </Text>
       {LOCATIONS.slice(0, 3).map((loc) => (
         <PanelListRow key={loc.id} label={loc.label} onClick={() => goToPlace(loc)} />
       ))}
+    </Stack>
+  );
+}
+
+const GLOBE_STARS: [number, number][] = [
+  [12, 8],
+  [28, 15],
+  [74, 11],
+  [88, 22],
+  [15, 78],
+  [82, 68],
+  [45, 10],
+  [62, 85],
+  [8, 42],
+  [91, 48],
+  [33, 72],
+  [70, 32],
+];
+
+function GlobeBackdrop({ pin }: { pin?: { x: number; y: number; visible: boolean } }) {
+  const theme = useHostTheme();
+  return (
+    <svg width="100%" height="100%" style={{ position: "absolute", inset: 0 }} aria-hidden>
+      <rect width="100%" height="100%" fill={theme.bg.editor} />
+      {GLOBE_STARS.map(([x, y], i) => (
+        <circle key={i} cx={`${x}%`} cy={`${y}%`} r="1" fill={theme.text.quaternary} opacity="0.55" />
+      ))}
+      <circle cx="50%" cy="54%" r="36%" fill="none" stroke={theme.accent.primary} strokeWidth="12" opacity="0.06" />
+      <circle cx="50%" cy="54%" r="33%" fill="none" stroke={theme.text.link} strokeWidth="4" opacity="0.12" />
+      <circle cx="50%" cy="54%" r="30%" fill={theme.text.link} opacity="0.28" />
+      <ellipse cx="58%" cy="54%" rx="18%" ry="28%" fill={theme.bg.editor} opacity="0.45" />
+      <ellipse cx="38%" cy="46%" rx="9%" ry="14%" fill={theme.fill.secondary} opacity="0.55" />
+      <ellipse cx="52%" cy="58%" rx="7%" ry="10%" fill={theme.fill.secondary} opacity="0.45" />
+      <ellipse cx="46%" cy="38%" rx="5%" ry="7%" fill={theme.fill.secondary} opacity="0.4" />
+      {pin?.visible ? (
+        <>
+          <circle cx={`${pin.x}%`} cy={`${pin.y}%`} r="14" fill={theme.accent.primary} opacity="0.15" />
+          <circle cx={`${pin.x}%`} cy={`${pin.y}%`} r="4" fill={theme.accent.primary} />
+        </>
+      ) : null}
+    </svg>
+  );
+}
+
+function UploadCheckIcon() {
+  const theme = useHostTheme();
+  return (
+    <div
+      style={{
+        width: 20,
+        height: 20,
+        borderRadius: 999,
+        background: theme.text.link,
+        display: "grid",
+        placeItems: "center",
+        flexShrink: 0,
+      }}
+    >
+      <svg width="10" height="10" viewBox="0 0 10 10" aria-hidden>
+        <path d="M2 5 L4 7 L8 3" stroke={theme.text.onAccent} strokeWidth="1.5" fill="none" />
+      </svg>
     </div>
-  )
+  );
+}
+
+function FloorplanThumbnail() {
+  const theme = useHostTheme();
+  return (
+    <WireBox style={{ width: 44, height: 44, padding: 0, overflow: "hidden", flexShrink: 0, borderRadius: 4 }}>
+      <svg width="44" height="44" aria-hidden>
+        <rect width="44" height="44" fill={theme.fill.quaternary} />
+        <rect x="8" y="10" width="28" height="24" fill="none" stroke={theme.stroke.secondary} strokeWidth="1" />
+        <rect x="14" y="16" width="10" height="8" fill="none" stroke={theme.stroke.tertiary} strokeWidth="0.75" />
+        <rect x="26" y="20" width="6" height="10" fill="none" stroke={theme.stroke.tertiary} strokeWidth="0.75" />
+      </svg>
+    </WireBox>
+  );
+}
+
+function UploadedFileTile({
+  file,
+  onRemove,
+  onSetLocation,
+}: {
+  file: MockUploadedFile;
+  onRemove: () => void;
+  onSetLocation: () => void;
+}) {
+  const theme = useHostTheme();
+  const hasLocation = !!file.locationAddress;
+
+  return (
+    <Row
+      align="center"
+      gap={8}
+      style={{
+        padding: "10px 4px",
+        borderTop: `1px solid ${theme.stroke.tertiary}`,
+        width: "100%",
+      }}
+    >
+      <UploadCheckIcon />
+      <FloorplanThumbnail />
+      <Text size="small" weight="semibold" style={{ flex: 1, minWidth: 0, textAlign: "left" }} truncate>
+        {file.fileName}
+      </Text>
+      {hasLocation ? (
+        <Chip label={file.locationAddress!.split(",")[0]} tone="success" />
+      ) : (
+        <Button
+          variant="secondary"
+          onClick={(e) => {
+            e.stopPropagation();
+            onSetLocation();
+          }}
+          style={{ fontSize: 10, padding: "4px 8px", whiteSpace: "nowrap" }}
+        >
+          Set location
+        </Button>
+      )}
+      <Button
+        variant="ghost"
+        onClick={(e) => {
+          e.stopPropagation();
+          onRemove();
+        }}
+        style={{ fontSize: 12, padding: "2px 8px", minWidth: 0 }}
+        title="Remove file"
+      >
+        x
+      </Button>
+    </Row>
+  );
+}
+
+function FirstVisitUploadCard({
+  uploadedFiles,
+  onUploadFile,
+  onRemoveFile,
+  onSetLocation,
+}: {
+  uploadedFiles: MockUploadedFile[];
+  onUploadFile: () => void;
+  onRemoveFile: (id: string) => void;
+  onSetLocation: (id: string) => void;
+}) {
+  const theme = useHostTheme();
+  const [dropHover, setDropHover] = useState(false);
+  const hasFiles = uploadedFiles.length > 0;
+
+  return (
+    <Card
+      style={{
+        position: "absolute",
+        top: "50%",
+        left: "50%",
+        transform: "translate(-50%, -50%)",
+        width: 480,
+        maxWidth: "92%",
+        zIndex: 15,
+      }}
+    >
+      <CardBody style={{ padding: 24 }}>
+        <Stack gap={14} style={{ textAlign: "center" }}>
+          <Stack gap={4}>
+            <Text weight="semibold" style={{ fontSize: 16 }}>
+              Welcome to Maps
+            </Text>
+            <Text size="small" tone="secondary">
+              See where every Verkada device lives in the real world. Upload a floorplan to get started.
+            </Text>
+          </Stack>
+
+          <Stack gap={8} style={{ textAlign: "left", width: "100%" }}>
+            <Text size="small" tone="tertiary" style={{ fontSize: 10, textTransform: "uppercase", letterSpacing: "0.04em" }}>
+              Add your files
+            </Text>
+            <WireBox style={{ padding: 0, overflow: "hidden" }}>
+              <div
+                role="button"
+                tabIndex={0}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  onUploadFile();
+                }}
+                onMouseEnter={() => setDropHover(true)}
+                onMouseLeave={() => setDropHover(false)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter" || e.key === " ") onUploadFile();
+                }}
+                style={{
+                  padding: hasFiles ? "20px 16px" : "36px 20px",
+                  borderBottom: hasFiles ? `1px solid ${theme.stroke.tertiary}` : "none",
+                  border: hasFiles ? "none" : `2px dashed ${dropHover ? theme.accent.primary : theme.stroke.secondary}`,
+                  borderRadius: hasFiles ? 0 : 8,
+                  background: dropHover ? theme.fill.tertiary : theme.fill.quaternary,
+                  cursor: "pointer",
+                  textAlign: "center",
+                }}
+              >
+                <Stack gap={6} style={{ alignItems: "center" }}>
+                  <Text weight="semibold">Drop floorplan here</Text>
+                  <Text size="small" tone="secondary">
+                    PDF, PNG, or JPG
+                  </Text>
+                  {!hasFiles ? (
+                    <Button
+                      variant="primary"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        onUploadFile();
+                      }}
+                    >
+                      Browse files
+                    </Button>
+                  ) : (
+                    <Text size="small" tone="tertiary">
+                      Drop to add another floorplan
+                    </Text>
+                  )}
+                </Stack>
+              </div>
+              {hasFiles ? (
+                <div style={{ padding: "0 12px 8px" }}>
+                  {uploadedFiles.map((file) => (
+                    <UploadedFileTile
+                      key={file.id}
+                      file={file}
+                      onRemove={() => onRemoveFile(file.id)}
+                      onSetLocation={() => onSetLocation(file.id)}
+                    />
+                  ))}
+                </div>
+              ) : null}
+            </WireBox>
+          </Stack>
+        </Stack>
+      </CardBody>
+    </Card>
+  );
+}
+
+function WorldMapBackdrop() {
+  const theme = useHostTheme();
+
+  // Simplified continental US + AK + HI for a Mapbox-style country reference (zoom ~4).
+  const continentalUs =
+    "M 118,58 L 168,52 L 228,48 L 298,46 L 368,48 L 428,54 L 478,64 L 512,82 L 532,108 " +
+    "L 542,138 L 544,172 L 536,206 L 518,238 L 492,264 L 458,284 L 418,298 L 372,308 L 322,314 " +
+    "L 272,316 L 222,314 L 172,308 L 128,296 L 98,276 L 82,248 L 74,216 L 72,182 L 78,148 L 92,118 L 108,92 Z";
+  const florida =
+    "M 458,284 L 472,302 L 488,318 L 502,332 L 494,342 L 478,338 L 464,320 L 456,298 Z";
+  const alaska =
+    "M 28,38 L 52,32 L 78,36 L 92,48 L 88,62 L 68,68 L 44,64 L 30,52 Z";
+  const hawaii: [number, number][] = [
+    [198, 328],
+    [208, 332],
+    [218, 330],
+    [228, 334],
+  ];
+
+  return (
+    <>
+      <svg
+        width="100%"
+        height="100%"
+        viewBox="0 0 640 420"
+        preserveAspectRatio="xMidYMid slice"
+        style={{ position: "absolute", inset: 0 }}
+        aria-hidden
+      >
+        {/* Ocean */}
+        <rect width="640" height="420" fill={theme.fill.secondary} />
+
+        {/* Subtle graticule */}
+        <defs>
+          <pattern id="usaGraticule" width="48" height="48" patternUnits="userSpaceOnUse">
+            <path d="M 48 0 L 0 0 0 48" fill="none" stroke={theme.stroke.tertiary} strokeWidth="0.35" opacity="0.5" />
+          </pattern>
+        </defs>
+        <rect width="640" height="420" fill="url(#usaGraticule)" opacity="0.35" />
+
+        {/* Land masses */}
+        <path d={continentalUs} fill={theme.fill.tertiary} stroke={theme.stroke.secondary} strokeWidth="1.2" />
+        <path d={florida} fill={theme.fill.tertiary} stroke={theme.stroke.secondary} strokeWidth="1" />
+        <path d={alaska} fill={theme.fill.tertiary} stroke={theme.stroke.secondary} strokeWidth="1" />
+        {hawaii.map(([cx, cy], i) => (
+          <circle key={`hi-${i}`} cx={cx} cy={cy} r="4" fill={theme.fill.tertiary} stroke={theme.stroke.secondary} strokeWidth="0.8" />
+        ))}
+
+        {/* Faint state / region hints */}
+        <line x1="280" y1="46" x2="272" y2="316" stroke={theme.stroke.tertiary} strokeWidth="0.6" opacity="0.45" />
+        <line x1="368" y1="48" x2="358" y2="310" stroke={theme.stroke.tertiary} strokeWidth="0.6" opacity="0.45" />
+        <line x1="118" y1="140" x2="544" y2="140" stroke={theme.stroke.tertiary} strokeWidth="0.6" opacity="0.35" />
+        <line x1="108" y1="220" x2="536" y2="220" stroke={theme.stroke.tertiary} strokeWidth="0.6" opacity="0.35" />
+
+        <text x="320" y="200" fontSize="11" fill={theme.text.tertiary} fontFamily="system-ui, sans-serif" textAnchor="middle" opacity="0.35">
+          United States
+        </text>
+
+        <text x="630" y="414" fontSize="8" fill={theme.text.tertiary} fontFamily="monospace" textAnchor="end">
+          © Mapbox · zoom 4 · United States
+        </text>
+      </svg>
+    </>
+  );
+}
+
+function ZoomedStreetMapBackdrop({
+  address,
+}: {
+  buildingOutline: string;
+  center: { x: number; y: number };
+  address?: string;
+}) {
+  const theme = useHostTheme();
+
+  // L-shaped building polygon (corner building, NW of intersection)
+  // Vertex points in the 640×420 SVG coordinate space
+  const bldgPoints = "178,118 296,118 296,140 296,254 248,254 248,195 178,195";
+
+  const displayAddress = address || "500 Howard St, San Francisco, CA";
+  // Truncate long addresses for the bubble
+  const bubbleLabel = displayAddress.length > 32
+    ? displayAddress.slice(0, 30) + "…"
+    : displayAddress;
+
+  return (
+    <>
+      <svg
+        width="100%"
+        height="100%"
+        viewBox="0 0 640 420"
+        preserveAspectRatio="xMidYMid slice"
+        style={{ position: "absolute", inset: 0 }}
+        aria-hidden
+      >
+        {/* ── Map background (Mapbox light style) ── */}
+        <rect width="640" height="420" fill={theme.fill.secondary} />
+
+        {/* ── Streets ── */}
+        {/* Howard St — vertical, slightly right of center */}
+        <rect x="306" y="0" width="22" height="420" fill={theme.bg.editor} />
+        {/* Mission St — horizontal */}
+        <rect x="0" y="262" width="640" height="20" fill={theme.bg.editor} />
+
+        {/* ── NW Block — parcels left of Howard, above Mission ── */}
+        {/* Row closest to Howard St */}
+        <rect x="248" y="22" width="52" height="66" rx="1" fill={theme.fill.tertiary} />
+        <rect x="196" y="24" width="46" height="64" rx="1" fill={theme.fill.tertiary} />
+        <rect x="144" y="26" width="46" height="62" rx="1" fill={theme.fill.tertiary} />
+        <rect x="90" y="28" width="48" height="60" rx="1" fill={theme.fill.tertiary} />
+        <rect x="28" y="28" width="56" height="60" rx="1" fill={theme.fill.tertiary} />
+        {/* Second row */}
+        <rect x="248" y="96" width="52" height="56" rx="1" fill={theme.fill.tertiary} />
+        <rect x="198" y="94" width="44" height="54" rx="1" fill={theme.fill.tertiary} />
+        <rect x="148" y="96" width="44" height="52" rx="1" fill={theme.fill.tertiary} />
+        <rect x="94" y="94" width="48" height="54" rx="1" fill={theme.fill.tertiary} />
+        <rect x="28" y="96" width="60" height="52" rx="1" fill={theme.fill.tertiary} />
+        {/* Third row, near Mission */}
+        <rect x="248" y="200" width="52" height="56" rx="1" fill={theme.fill.tertiary} />
+        <rect x="198" y="200" width="44" height="56" rx="1" fill={theme.fill.tertiary} />
+        <rect x="148" y="198" width="44" height="58" rx="1" fill={theme.fill.tertiary} />
+        <rect x="92" y="200" width="50" height="56" rx="1" fill={theme.fill.tertiary} />
+        <rect x="28" y="198" width="58" height="58" rx="1" fill={theme.fill.tertiary} />
+
+        {/* ── NE Block — parcels right of Howard, above Mission ── */}
+        <rect x="334" y="22" width="52" height="66" rx="1" fill={theme.fill.tertiary} />
+        <rect x="392" y="24" width="50" height="64" rx="1" fill={theme.fill.tertiary} />
+        <rect x="448" y="26" width="48" height="62" rx="1" fill={theme.fill.tertiary} />
+        <rect x="502" y="28" width="46" height="60" rx="1" fill={theme.fill.tertiary} />
+        <rect x="554" y="28" width="82" height="60" rx="1" fill={theme.fill.tertiary} />
+        <rect x="334" y="96" width="52" height="56" rx="1" fill={theme.fill.tertiary} />
+        <rect x="392" y="94" width="50" height="58" rx="1" fill={theme.fill.tertiary} />
+        <rect x="448" y="96" width="48" height="56" rx="1" fill={theme.fill.tertiary} />
+        <rect x="502" y="94" width="46" height="58" rx="1" fill={theme.fill.tertiary} />
+        <rect x="554" y="96" width="82" height="56" rx="1" fill={theme.fill.tertiary} />
+        <rect x="334" y="200" width="52" height="56" rx="1" fill={theme.fill.tertiary} />
+        <rect x="392" y="198" width="50" height="58" rx="1" fill={theme.fill.tertiary} />
+        <rect x="448" y="200" width="48" height="56" rx="1" fill={theme.fill.tertiary} />
+        <rect x="502" y="200" width="46" height="56" rx="1" fill={theme.fill.tertiary} />
+        <rect x="554" y="200" width="82" height="56" rx="1" fill={theme.fill.tertiary} />
+
+        {/* ── SW Block — below Mission, left of Howard ── */}
+        <rect x="248" y="288" width="52" height="62" rx="1" fill={theme.fill.tertiary} />
+        <rect x="196" y="290" width="46" height="60" rx="1" fill={theme.fill.tertiary} />
+        <rect x="144" y="288" width="46" height="62" rx="1" fill={theme.fill.tertiary} />
+        <rect x="90" y="290" width="48" height="60" rx="1" fill={theme.fill.tertiary} />
+        <rect x="28" y="290" width="56" height="60" rx="1" fill={theme.fill.tertiary} />
+        <rect x="248" y="358" width="52" height="58" rx="1" fill={theme.fill.tertiary} />
+        <rect x="196" y="356" width="46" height="60" rx="1" fill={theme.fill.tertiary} />
+        <rect x="144" y="358" width="46" height="58" rx="1" fill={theme.fill.tertiary} />
+        <rect x="90" y="358" width="48" height="58" rx="1" fill={theme.fill.tertiary} />
+        <rect x="28" y="356" width="56" height="60" rx="1" fill={theme.fill.tertiary} />
+
+        {/* ── SE Block — below Mission, right of Howard ── */}
+        <rect x="334" y="288" width="52" height="62" rx="1" fill={theme.fill.tertiary} />
+        <rect x="392" y="290" width="50" height="60" rx="1" fill={theme.fill.tertiary} />
+        <rect x="448" y="288" width="48" height="62" rx="1" fill={theme.fill.tertiary} />
+        <rect x="502" y="290" width="46" height="60" rx="1" fill={theme.fill.tertiary} />
+        <rect x="554" y="290" width="82" height="60" rx="1" fill={theme.fill.tertiary} />
+        <rect x="334" y="358" width="52" height="58" rx="1" fill={theme.fill.tertiary} />
+        <rect x="392" y="356" width="50" height="60" rx="1" fill={theme.fill.tertiary} />
+        <rect x="448" y="358" width="48" height="58" rx="1" fill={theme.fill.tertiary} />
+        <rect x="502" y="356" width="46" height="60" rx="1" fill={theme.fill.tertiary} />
+        <rect x="554" y="356" width="82" height="60" rx="1" fill={theme.fill.tertiary} />
+
+        {/* ── Selected / confirmed building (L-shape, NW of intersection) ── */}
+        <polygon
+          points={bldgPoints}
+          fill={theme.accent.primary}
+          fillOpacity="0.08"
+          stroke={theme.accent.primary}
+          strokeWidth="2.5"
+          strokeLinejoin="round"
+        />
+
+        {/* ── Address label bubble (right of building) ── */}
+        <rect x="310" y="174" width={Math.max(120, bubbleLabel.length * 7 + 20)} height="26"
+          rx="4" fill={theme.bg.editor} stroke={theme.stroke.secondary} strokeWidth="1" />
+        <text x="320" y="192" fontSize="11" fontWeight="600"
+          fill={theme.accent.primary} fontFamily="system-ui, -apple-system, sans-serif">
+          {bubbleLabel}
+        </text>
+
+        {/* ── Street name labels ── */}
+        <text x="317" y="140" fontSize="9" fill={theme.text.tertiary}
+          fontFamily="system-ui, sans-serif"
+          transform="rotate(90, 317, 140)" textAnchor="middle">
+          Howard St
+        </text>
+        <text x="317" y="350" fontSize="9" fill={theme.text.tertiary}
+          fontFamily="system-ui, sans-serif"
+          transform="rotate(90, 317, 350)" textAnchor="middle">
+          Howard St
+        </text>
+        <text x="150" y="275" fontSize="9" fill={theme.text.tertiary}
+          fontFamily="system-ui, sans-serif" textAnchor="middle">
+          Mission St
+        </text>
+        <text x="490" y="275" fontSize="9" fill={theme.text.tertiary}
+          fontFamily="system-ui, sans-serif" textAnchor="middle">
+          Mission St
+        </text>
+
+        {/* ── Parcel address numbers on a few nearby parcels ── */}
+        <text x="274" y="58" fontSize="8" fill={theme.text.tertiary} fontFamily="system-ui" textAnchor="middle">500</text>
+        <text x="219" y="58" fontSize="8" fill={theme.text.tertiary} fontFamily="system-ui" textAnchor="middle">506</text>
+        <text x="167" y="60" fontSize="8" fill={theme.text.tertiary} fontFamily="system-ui" textAnchor="middle">512</text>
+        <text x="360" y="58" fontSize="8" fill={theme.text.tertiary} fontFamily="system-ui" textAnchor="middle">501</text>
+        <text x="417" y="58" fontSize="8" fill={theme.text.tertiary} fontFamily="system-ui" textAnchor="middle">507</text>
+        <text x="472" y="60" fontSize="8" fill={theme.text.tertiary} fontFamily="system-ui" textAnchor="middle">513</text>
+
+        {/* ── Map attribution ── */}
+        <text x="630" y="414" fontSize="8" fill={theme.text.tertiary}
+          fontFamily="monospace" textAnchor="end">
+          © Mapbox · zoom 17
+        </text>
+      </svg>
+    </>
+  );
+}
+
+type LocationFlowStep = "search" | "align" | "select-sites";
+
+const LOCATION_FLOW_STEP_TOTAL = 3;
+
+const LOCATION_FLOW_STEPS: Record<
+  LocationFlowStep,
+  { num: number; title: string; hint: string }
+> = {
+  search: { num: 1, title: "Set address", hint: "" },
+  align: { num: 2, title: "Align to building", hint: "Match your floorplan to the footprint" },
+  "select-sites": {
+    num: 3,
+    title: "Select sites",
+    hint: "Choose at least one site to link devices from",
+  },
+};
+
+function LocationFlowSidePanel({
+  step,
+  onBack,
+  children,
+}: {
+  step: LocationFlowStep;
+  fileName: string;
+  onBack?: () => void;
+  children: React.ReactNode;
+}) {
+  const theme = useHostTheme();
+  const meta = LOCATION_FLOW_STEPS[step];
+
+  return (
+    <WireBox
+      style={{
+        position: "absolute",
+        top: 12,
+        left: 12,
+        width: 300,
+        maxHeight: "calc(100% - 24px)",
+        zIndex: 20,
+        display: "flex",
+        flexDirection: "column",
+        overflow: "hidden",
+        padding: 0,
+      }}
+    >
+      <Stack
+        gap={6}
+        style={{
+          padding: "12px 12px 10px",
+          borderBottom: `1px solid ${theme.stroke.tertiary}`,
+          flexShrink: 0,
+        }}
+      >
+        <Row gap={8} align="center">
+          {onBack ? (
+            <Button variant="ghost" onClick={onBack} style={{ fontSize: 11, padding: "2px 6px", flexShrink: 0 }}>
+              Back
+            </Button>
+          ) : null}
+        </Row>
+        <Text size="small" tone="tertiary" style={{ fontSize: 10, textTransform: "uppercase" }}>
+          Step {meta.num} of {LOCATION_FLOW_STEP_TOTAL}
+        </Text>
+        <Text size="small" weight="semibold">
+          {meta.title}
+        </Text>
+        {meta.hint ? (
+          <Text size="small" tone="secondary">
+            {meta.hint}
+          </Text>
+        ) : null}
+      </Stack>
+      <div style={{ overflow: "auto", flex: 1 }}>{children}</div>
+    </WireBox>
+  );
+}
+
+function LocationSearchStepContent({
+  query,
+  searchFocused,
+  locationPinned,
+  onFocus,
+  onChange,
+  onSelectSuggestion,
+  onSubmitTyped,
+  onContinueToAlign,
+}: {
+  query: string;
+  searchFocused: boolean;
+  locationPinned: boolean;
+  onFocus: () => void;
+  onChange: (value: string) => void;
+  onSelectSuggestion: (suggestion: VerkadaAddressSuggestion) => void;
+  onSubmitTyped: () => void;
+  onContinueToAlign: () => void;
+}) {
+  const theme = useHostTheme();
+  const suggestions = filterAddressSuggestions(query);
+  const grouped = (["Site", "Camera", "Alarms area", "Access door"] as VerkadaAddressSource[]).map((source) => ({
+    source,
+    items: suggestions.filter((s) => s.source === source),
+  }));
+
+  return (
+    <Stack gap={0}>
+      <div
+        style={{ padding: "10px 12px", borderBottom: `1px solid ${theme.stroke.tertiary}` }}
+        onKeyDown={(e) => {
+          if (e.key === "Enter" && query.trim()) {
+            e.preventDefault();
+            onSubmitTyped();
+          }
+        }}
+      >
+        <TextInput
+          value={query}
+          onChange={onChange}
+          onFocus={onFocus}
+          placeholder="Search address…"
+          type="search"
+          style={{ width: "100%" }}
+        />
+      </div>
+      {searchFocused ? (
+        <Stack gap={0} style={{ maxHeight: 220, overflow: "auto" }}>
+          <Text size="small" tone="tertiary" style={{ padding: "8px 12px 4px", fontSize: 10, textTransform: "uppercase" }}>
+            From your Verkada org
+          </Text>
+          {grouped.map(({ source, items }) =>
+            items.length > 0 ? (
+              <Stack key={source} gap={0}>
+                <Text size="small" tone="tertiary" style={{ padding: "6px 12px 2px", fontSize: 10 }}>
+                  {source}
+                </Text>
+                {items.map((s) => (
+                  <PanelListRow
+                    key={s.id}
+                    label={s.label}
+                    trailing={s.address.split(",")[0]}
+                    onClick={() => onSelectSuggestion(s)}
+                  />
+                ))}
+              </Stack>
+            ) : null,
+          )}
+          {query.trim() ? (
+            <button
+              type="button"
+              onClick={onSubmitTyped}
+              style={{
+                width: "100%",
+                padding: "10px 12px",
+                border: "none",
+                borderTop: `1px solid ${theme.stroke.tertiary}`,
+                background: theme.fill.tertiary,
+                color: theme.text.primary,
+                cursor: "pointer",
+                fontSize: 11,
+                textAlign: "left",
+              }}
+            >
+              Use &quot;{query.trim()}&quot;
+            </button>
+          ) : null}
+        </Stack>
+      ) : null}
+      {locationPinned ? (
+        <Stack gap={8} style={{ padding: 12, borderTop: `1px solid ${theme.stroke.tertiary}` }}>
+          <Text size="small" tone="secondary">
+            Check the building outline on the map. Next, align your floorplan to the footprint.
+          </Text>
+          <Button variant="primary" onClick={onContinueToAlign} style={{ width: "100%" }}>
+            Align your file to the map
+          </Button>
+        </Stack>
+      ) : null}
+    </Stack>
+  );
+}
+
+function AlignmentStepContent({
+  fileName,
+  opacity,
+  scale,
+  rotation,
+  onOpacityChange,
+  onScaleChange,
+  onRotationChange,
+  onConfirm,
+}: {
+  fileName: string;
+  opacity: number;
+  scale: number;
+  rotation: number;
+  onOpacityChange: (v: number) => void;
+  onScaleChange: (v: number) => void;
+  onRotationChange: (v: number) => void;
+  onConfirm: () => void;
+}) {
+  const theme = useHostTheme();
+
+  const sliderStyle: Record<string, string | number> = {
+    flex: 1,
+    height: 3,
+    cursor: "pointer",
+    accentColor: theme.accent.primary,
+  };
+
+  const labelStyle: Record<string, string | number> = {
+    fontSize: 10,
+    color: theme.text.tertiary,
+    width: 52,
+    flexShrink: 0,
+  };
+
+  const valueStyle: Record<string, string | number> = {
+    fontSize: 10,
+    color: theme.text.secondary,
+    width: 32,
+    textAlign: "right",
+    flexShrink: 0,
+  };
+
+  return (
+    <Stack gap={12} style={{ padding: 12 }}>
+      <Text size="small" tone="secondary">
+        {fileName}
+      </Text>
+      <Stack gap={8}>
+        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+          <span style={labelStyle}>Opacity</span>
+          <input
+            type="range"
+            min="0.1"
+            max="1"
+            step="0.05"
+            value={opacity}
+            onChange={(e) => onOpacityChange(parseFloat(e.target.value))}
+            style={sliderStyle}
+          />
+          <span style={valueStyle}>{Math.round(opacity * 100)}%</span>
+        </div>
+        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+          <span style={labelStyle}>Scale</span>
+          <input
+            type="range"
+            min="0.3"
+            max="3"
+            step="0.05"
+            value={scale}
+            onChange={(e) => onScaleChange(parseFloat(e.target.value))}
+            style={sliderStyle}
+          />
+          <span style={valueStyle}>{scale.toFixed(2)}×</span>
+        </div>
+        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+          <span style={labelStyle}>Rotation</span>
+          <input
+            type="range"
+            min="-180"
+            max="180"
+            step="1"
+            value={rotation}
+            onChange={(e) => onRotationChange(parseFloat(e.target.value))}
+            style={sliderStyle}
+          />
+          <span style={valueStyle}>{rotation}°</span>
+        </div>
+      </Stack>
+      <Button variant="primary" onClick={onConfirm} style={{ width: "100%" }}>
+        Confirm alignment
+      </Button>
+    </Stack>
+  );
+}
+
+// ─── Floorplan alignment step ─────────────────────────────────────────────────
+
+function FloorplanRasterOverlay({
+  opacity,
+  scale,
+  rotation,
+  centerX,
+  centerY,
+  offsetX,
+  offsetY,
+}: {
+  opacity: number;
+  scale: number;
+  rotation: number;
+  centerX: number;
+  centerY: number;
+  offsetX: number;
+  offsetY: number;
+}) {
+  const theme = useHostTheme();
+  return (
+    <div
+      style={{
+        position: "absolute",
+        left: `calc(${centerX}% + ${offsetX}px)`,
+        top: `calc(${centerY}% + ${offsetY}px)`,
+        transform: `translate(-50%, -50%) scale(${scale}) rotate(${rotation}deg)`,
+        transformOrigin: "center center",
+        opacity,
+        pointerEvents: "none",
+        width: 220,
+        height: 170,
+      }}
+    >
+      <svg
+        width="220"
+        height="170"
+        viewBox="0 0 220 170"
+        fill="none"
+        xmlns="http://www.w3.org/2000/svg"
+        style={{ display: "block" }}
+      >
+        {/* Blueprint background */}
+        <rect width="220" height="170" fill={theme.fill.secondary} />
+        {/* Outer walls */}
+        <rect x="4" y="4" width="212" height="162" stroke={theme.accent.primary} strokeWidth="2.5" fill="none" />
+        {/* Interior horizontal dividers */}
+        <line x1="4" y1="60" x2="140" y2="60" stroke={theme.accent.primary} strokeWidth="1.5" />
+        <line x1="4" y1="110" x2="180" y2="110" stroke={theme.accent.primary} strokeWidth="1.5" />
+        {/* Interior vertical dividers */}
+        <line x1="90" y1="4" x2="90" y2="60" stroke={theme.accent.primary} strokeWidth="1.5" />
+        <line x1="140" y1="60" x2="140" y2="170" stroke={theme.accent.primary} strokeWidth="1.5" />
+        <line x1="60" y1="110" x2="60" y2="170" stroke={theme.accent.primary} strokeWidth="1.5" />
+        {/* Door openings (gaps) represented as lighter rectangles */}
+        <rect x="88" y="56" width="6" height="8" fill={theme.fill.secondary} />
+        <rect x="136" y="56" width="8" height="6" fill={theme.fill.secondary} />
+        <rect x="56" y="106" width="8" height="6" fill={theme.fill.secondary} />
+        {/* Room hatching / fill areas */}
+        <rect x="5" y="5" width="84" height="54" fill={theme.accent.primary} fillOpacity="0.04" />
+        <rect x="92" y="5" width="124" height="54" fill={theme.accent.primary} fillOpacity="0.07" />
+        <rect x="5" y="62" width="134" height="47" fill={theme.accent.primary} fillOpacity="0.05" />
+        <rect x="142" y="62" width="74" height="47" fill={theme.accent.primary} fillOpacity="0.03" />
+        <rect x="5" y="112" width="54" height="54" fill={theme.accent.primary} fillOpacity="0.06" />
+        <rect x="62" y="112" width="77" height="54" fill={theme.accent.primary} fillOpacity="0.04" />
+        <rect x="142" y="112" width="74" height="54" fill={theme.accent.primary} fillOpacity="0.07" />
+        {/* Scale bar */}
+        <line x1="10" y1="160" x2="50" y2="160" stroke={theme.accent.primary} strokeWidth="1" />
+        <line x1="10" y1="157" x2="10" y2="163" stroke={theme.accent.primary} strokeWidth="1" />
+        <line x1="50" y1="157" x2="50" y2="163" stroke={theme.accent.primary} strokeWidth="1" />
+        {/* Alignment border dashes */}
+        <rect
+          x="1"
+          y="1"
+          width="218"
+          height="168"
+          stroke={theme.accent.primary}
+          strokeWidth="1"
+          strokeDasharray="6 4"
+          fill="none"
+          opacity="0.5"
+        />
+      </svg>
+    </div>
+  );
+}
+
+function CroppedFloorplanOnMap({
+  scale,
+  rotation,
+  offsetX,
+  offsetY,
+}: {
+  scale: number;
+  rotation: number;
+  offsetX: number;
+  offsetY: number;
+}) {
+  const theme = useHostTheme();
+  return (
+    <div
+      style={{
+        position: "absolute",
+        left: "27.8%",
+        top: "28.1%",
+        width: "18.4%",
+        height: "32.4%",
+        overflow: "hidden",
+        clipPath: "polygon(0% 0%, 100% 0%, 100% 8%, 100% 100%, 58% 100%, 58% 42%, 0% 42%)",
+        zIndex: 10,
+        pointerEvents: "none",
+      }}
+    >
+      <div
+        style={{
+          position: "absolute",
+          left: "50%",
+          top: "50%",
+          width: 220,
+          height: 170,
+          transform: `translate(calc(-50% + ${offsetX}px), calc(-50% + ${offsetY}px)) scale(${scale}) rotate(${rotation}deg)`,
+          transformOrigin: "center center",
+        }}
+      >
+        <svg width="220" height="170" viewBox="0 0 220 170" fill="none" style={{ display: "block" }}>
+          <rect width="220" height="170" fill={theme.fill.secondary} />
+          <rect x="4" y="4" width="212" height="162" stroke={theme.accent.primary} strokeWidth="2.5" fill="none" />
+          <line x1="4" y1="60" x2="140" y2="60" stroke={theme.accent.primary} strokeWidth="1.5" />
+          <line x1="4" y1="110" x2="180" y2="110" stroke={theme.accent.primary} strokeWidth="1.5" />
+          <line x1="90" y1="4" x2="90" y2="60" stroke={theme.accent.primary} strokeWidth="1.5" />
+          <line x1="140" y1="60" x2="140" y2="170" stroke={theme.accent.primary} strokeWidth="1.5" />
+          <line x1="60" y1="110" x2="60" y2="170" stroke={theme.accent.primary} strokeWidth="1.5" />
+          <rect x="5" y="5" width="84" height="54" fill={theme.accent.primary} fillOpacity="0.06" />
+          <rect x="92" y="5" width="124" height="54" fill={theme.accent.primary} fillOpacity="0.09" />
+          <rect x="5" y="62" width="134" height="47" fill={theme.accent.primary} fillOpacity="0.07" />
+          <rect x="142" y="62" width="74" height="47" fill={theme.accent.primary} fillOpacity="0.05" />
+          <rect x="5" y="112" width="54" height="54" fill={theme.accent.primary} fillOpacity="0.08" />
+          <rect x="62" y="112" width="77" height="54" fill={theme.accent.primary} fillOpacity="0.06" />
+          <rect x="142" y="112" width="74" height="54" fill={theme.accent.primary} fillOpacity="0.09" />
+        </svg>
+      </div>
+    </div>
+  );
+}
+
+function SiteSelectionStepContent({
+  query,
+  selectedSiteIds,
+  onQueryChange,
+  onToggleSite,
+  onConfirm,
+}: {
+  query: string;
+  selectedSiteIds: string[];
+  onQueryChange: (value: string) => void;
+  onToggleSite: (siteId: string) => void;
+  onConfirm: () => void;
+}) {
+  const theme = useHostTheme();
+  const sites = filterOrgSites(query);
+  const canContinue = selectedSiteIds.length >= 1;
+
+  return (
+    <Stack gap={0}>
+      <div style={{ padding: "10px 12px", borderBottom: `1px solid ${theme.stroke.tertiary}` }}>
+        <TextInput
+          value={query}
+          onChange={onQueryChange}
+          placeholder="Search sites…"
+          type="search"
+          style={{ width: "100%" }}
+        />
+      </div>
+      <Stack gap={0} style={{ maxHeight: 260, overflow: "auto" }}>
+        {sites.length > 0 ? (
+          sites.map((site) => {
+            const selected = selectedSiteIds.includes(site.id);
+            return (
+              <button
+                key={site.id}
+                type="button"
+                onClick={() => onToggleSite(site.id)}
+                style={{
+                  width: "100%",
+                  padding: "10px 12px",
+                  border: "none",
+                  borderBottom: `1px solid ${theme.stroke.tertiary}`,
+                  background: selected ? theme.fill.tertiary : "transparent",
+                  cursor: "pointer",
+                  textAlign: "left",
+                }}
+              >
+                <Row gap={8} align="start">
+                  <span style={{ display: "inline-flex", pointerEvents: "none", flexShrink: 0 }}>
+                    <Checkbox checked={selected} onChange={() => {}} />
+                  </span>
+                  <Stack gap={2} style={{ flex: 1, minWidth: 0 }}>
+                    <Text size="small" weight="semibold">
+                      {site.name}
+                    </Text>
+                    <Text size="small" tone="tertiary" style={{ fontSize: 10 }}>
+                      {site.code}
+                    </Text>
+                    <Text size="small" tone="secondary" style={{ fontSize: 10, lineHeight: 1.4 }}>
+                      {formatSiteDeviceBreakdown(site)}
+                    </Text>
+                  </Stack>
+                </Row>
+              </button>
+            );
+          })
+        ) : (
+          <Text size="small" tone="tertiary" style={{ padding: 12 }}>
+            No sites match your search.
+          </Text>
+        )}
+      </Stack>
+      <Stack gap={8} style={{ padding: 12, borderTop: `1px solid ${theme.stroke.tertiary}` }}>
+        <Row gap={8} align="center" justify="between" wrap>
+          <Text size="small" tone="tertiary" style={{ flex: 1, minWidth: 120 }}>
+            {selectedSiteIds.length === 0
+              ? "Select at least one site."
+              : `${selectedSiteIds.length} site${selectedSiteIds.length === 1 ? "" : "s"} selected`}
+          </Text>
+          <Button
+            variant="primary"
+            onClick={onConfirm}
+            style={{ flexShrink: 0, opacity: canContinue ? 1 : 0.45 }}
+            disabled={!canContinue}
+          >
+            Start Plotting Devices
+          </Button>
+        </Row>
+      </Stack>
+    </Stack>
+  );
 }
 
 function PrototypeFrame({
@@ -991,11 +2698,12 @@ function PrototypeFrame({
   setState,
   showDropHint,
 }: {
-  state: AppState
-  setState: (patch: Partial<AppState>) => void
-  showDropHint?: boolean
+  state: AppState;
+  setState: (patch: Partial<AppState>) => void;
+  showDropHint?: boolean;
 }) {
-  const selectedPlace = LOCATIONS.find((l) => l.id === state.selectedPlaceId) ?? null
+  const theme = useHostTheme();
+  const selectedPlace = LOCATIONS.find((l) => l.id === state.selectedPlaceId) ?? null;
 
   const switchRail = (id: RailId) => {
     setState({
@@ -1007,80 +2715,335 @@ function PrototypeFrame({
       searchFocused: false,
       searchQuery: "",
       filesFlyoutOpen: false,
-    })
-  }
+    });
+  };
 
   const enterEditorFromManage = () => {
     setState({
       editorEntry: "in-context",
       editorMode: true,
+      orgHasFloorplans: true,
       selectedPlaceId: "floor-3",
       editorTool: "Select",
       editorRightTab: "tools",
-    })
-  }
+    });
+  };
+
+  const isFirstVisitFlow = !state.orgHasFloorplans && !state.editorMode && state.editorEntry !== "manage-home";
+  const isFirstVisitUpload = isFirstVisitFlow && (state.uploadStage === "idle" || state.uploadStage === "confirmed");
+  const isLocatingFloorplan = isFirstVisitFlow && state.uploadStage === "locating";
+  const isAligningFloorplan = isFirstVisitFlow && state.uploadStage === "aligning";
+  const isSelectingSites = isFirstVisitFlow && state.uploadStage === "select-sites";
+  const isLocationFlowMap = isLocatingFloorplan || isAligningFloorplan || isSelectingSites;
+
+  const uploadedFiles = state.uploadedFiles ?? [];
+  const locatingFile = uploadedFiles.find((f) => f.id === state.locatingFileId) ?? null;
+
+  const simulateFileUpload = () => {
+    const nextName = MOCK_UPLOAD_FILES[uploadedFiles.length % MOCK_UPLOAD_FILES.length];
+    const id = `file-${uploadedFiles.length + 1}`;
+    setState({
+      uploadStage: "confirmed",
+      uploadedFiles: [...uploadedFiles, { id, fileName: nextName, locationAddress: null }],
+      filesFlyoutOpen: false,
+    });
+  };
+
+  const removeUploadedFile = (id: string) => {
+    const next = uploadedFiles.filter((f) => f.id !== id);
+    setState({
+      uploadedFiles: next,
+      uploadStage: next.length === 0 ? "idle" : "confirmed",
+      locatingFileId: state.locatingFileId === id ? null : state.locatingFileId,
+    });
+  };
+
+  const beginLocationForFile = (fileId: string) => {
+    setState({
+      uploadStage: "locating",
+      locatingFileId: fileId,
+      locationQuery: "",
+      locationSearchFocused: false,
+      locationPinned: false,
+      selectedAddressId: null,
+      locationPinX: 48,
+      locationPinY: 52,
+    });
+  };
+
+  const cancelLocationSetup = () => {
+    setState({
+      uploadStage: "confirmed",
+      locatingFileId: null,
+      locationQuery: "",
+      locationSearchFocused: false,
+      locationPinned: false,
+      selectedAddressId: null,
+    });
+  };
+
+  const selectVerkadaAddress = (suggestion: VerkadaAddressSuggestion) => {
+    setState({
+      locationQuery: suggestion.address,
+      locationSearchFocused: false,
+      locationPinned: true,
+      selectedAddressId: suggestion.id,
+      locationPinX: suggestion.mapCenter.x,
+      locationPinY: suggestion.mapCenter.y,
+    });
+  };
+
+  const submitTypedAddress = () => {
+    const q = state.locationQuery.trim();
+    if (!q) return;
+    setState({
+      locationSearchFocused: false,
+      locationPinned: true,
+      selectedAddressId: null,
+      locationPinX: 50,
+      locationPinY: 52,
+    });
+  };
+
+  const activeAddressSuggestion = getAddressSuggestion(state.selectedAddressId ?? null);
+  const locatingBuildingOutline =
+    activeAddressSuggestion?.buildingOutline ?? "38%,38% 62%,36% 64%,58% 40%,60%";
+  const locatingMapCenter = activeAddressSuggestion?.mapCenter ?? {
+    x: state.locationPinX,
+    y: state.locationPinY,
+  };
+
+  const confirmFloorplanLocation = () => {
+    if (!state.locatingFileId) return;
+    const address = state.locationQuery.trim() || "Pinned on map";
+    const nextFiles = uploadedFiles.map((f) =>
+      f.id === state.locatingFileId ? { ...f, locationAddress: address } : f,
+    );
+    // Always enter alignment step after confirming location
+    setState({
+      uploadedFiles: nextFiles,
+      uploadStage: "aligning",
+      locationSearchFocused: false,
+      alignOpacity: 0.65,
+      alignScale: 1,
+      alignRotation: 0,
+      alignOffsetX: 0,
+      alignOffsetY: 0,
+    });
+  };
+
+  const confirmAlignment = () => {
+    setState({
+      uploadStage: "select-sites",
+      alignOpacity: 1,
+      siteSearchQuery: "",
+      selectedSiteIds: [],
+    });
+  };
+
+  const backFromSiteSelection = () => {
+    setState({
+      uploadStage: "aligning",
+      siteSearchQuery: "",
+      selectedSiteIds: [],
+    });
+  };
+
+  const toggleSiteSelection = (siteId: string) => {
+    const current = state.selectedSiteIds ?? [];
+    const next = current.includes(siteId) ? current.filter((id) => id !== siteId) : [...current, siteId];
+    setState({ selectedSiteIds: next });
+  };
+
+  const confirmSiteSelection = () => {
+    if ((state.selectedSiteIds ?? []).length === 0) return;
+    const selectedSiteIds = state.selectedSiteIds ?? [];
+    const allLocated = uploadedFiles.every((f) => f.locationAddress);
+    if (allLocated && uploadedFiles.length === 1) {
+      setState({
+        orgHasFloorplans: true,
+        uploadStage: "idle",
+        uploadedFiles: [],
+        locatingFileId: null,
+        locationQuery: "",
+        locationSearchFocused: false,
+        locationPinned: false,
+        selectedAddressId: null,
+        siteSearchQuery: "",
+        selectedSiteIds,
+        selectedPlaceId: "floor-3",
+        editorMode: true,
+        editorEntry: "in-context",
+        editorTool: "Select",
+        editorRightTab: "devices",
+        stampActive: false,
+      });
+      return;
+    }
+    setState({
+      uploadStage: "confirmed",
+      locatingFileId: null,
+      locationQuery: "",
+      locationSearchFocused: false,
+      locationPinned: false,
+      selectedAddressId: null,
+      siteSearchQuery: "",
+      selectedSiteIds: [],
+    });
+  };
+
+  const openFilesUpload = () => {
+    if (isFirstVisitFlow) return;
+    setState({ filesFlyoutOpen: true, editorEntry: "none" });
+  };
 
   if (state.editorEntry === "manage-home") {
     return (
-      <WireBox className="relative h-[520px] overflow-hidden bg-muted/20">
-        <WireBox className="absolute inset-x-0 top-0 flex h-9 items-center gap-3 rounded-none border-x-0 border-t-0 px-3">
-          <span className="text-xs text-muted-foreground">Command</span>
-          <span className="text-xs">Maps › Manage Maps</span>
+      <WireBox style={{ position: "relative", height: 520, overflow: "hidden", background: theme.bg.editor }}>
+        <WireBox
+          style={{
+            position: "absolute",
+            top: 0,
+            left: 0,
+            right: 0,
+            height: 36,
+            display: "flex",
+            alignItems: "center",
+            gap: 12,
+            padding: "0 12px",
+            borderRadius: 0,
+            borderLeft: "none",
+            borderRight: "none",
+            borderTop: "none",
+          }}
+        >
+          <Text size="small" tone="tertiary">
+            Command
+          </Text>
+          <Text size="small">Maps › Manage Maps</Text>
+          {!state.orgHasFloorplans ? (
+            <>
+              <Chip label="No floorplan" tone="neutral" />
+              <Spacer />
+              <Button variant="ghost" onClick={() => setState({ editorEntry: "none" })}>
+                Back to map
+              </Button>
+            </>
+          ) : null}
         </WireBox>
-        <div className="absolute inset-x-0 bottom-0 top-9">
-          <ManageMapsHome onOpenFloor={enterEditorFromManage} />
+        <div style={{ position: "absolute", top: 36, left: 0, right: 0, bottom: 0 }}>
+          <ManageMapsHome
+            empty={!state.orgHasFloorplans}
+            onOpenFloor={enterEditorFromManage}
+            onCreateBuilding={openFilesUpload}
+            onImportFiles={openFilesUpload}
+          />
         </div>
       </WireBox>
-    )
+    );
   }
 
-  const rightPanelWidth = state.editorMode ? 240 : 0
+  const rightPanelWidth = state.editorMode ? 240 : 0;
 
   return (
-    <WireBox className="relative h-[520px] overflow-hidden bg-muted/20">
+    <WireBox style={{ position: "relative", height: 520, overflow: "hidden", background: theme.bg.editor }}>
       {/* Command band */}
-      <WireBox className="absolute inset-x-0 top-0 z-30 flex h-9 items-center gap-3 rounded-none border-x-0 border-t-0 px-3">
-        <span className="text-xs text-muted-foreground">Command</span>
-        <span className="text-xs">Maps</span>
-        <span className="flex-1" />
-        <span className="text-xs text-muted-foreground">Azalea Phangsoa</span>
+      <WireBox
+        style={{
+          position: "absolute",
+          top: 0,
+          left: 0,
+          right: 0,
+          height: 36,
+          display: "flex",
+          alignItems: "center",
+          gap: 12,
+          padding: "0 12px",
+          borderRadius: 0,
+          borderLeft: "none",
+          borderRight: "none",
+          borderTop: "none",
+          zIndex: 30,
+        }}
+      >
+        <Text size="small" tone="tertiary">
+          Command
+        </Text>
+        <Text size="small">Maps</Text>
+        <Spacer />
+        <Text size="small" tone="secondary">
+          ankush.rustagi
+        </Text>
       </WireBox>
 
       {/* Editor top bar */}
-      {state.editorMode && (
+      {state.editorMode ? (
         <WireBox
-          className="absolute z-25 flex h-10 items-center gap-2 rounded-none border-x-0 border-t-0 px-3"
-          style={{ top: 36, left: 40, right: rightPanelWidth }}
+          style={{
+            position: "absolute",
+            top: 36,
+            left: 40,
+            right: rightPanelWidth,
+            height: 40,
+            zIndex: 25,
+            display: "flex",
+            alignItems: "center",
+            gap: 8,
+            padding: "0 12px",
+            borderRadius: 0,
+            borderLeft: "none",
+            borderRight: "none",
+            borderTop: "none",
+          }}
         >
-          <button
-            type="button"
-            className={btnClass("ghost")}
+          <Button
+            variant="ghost"
             onClick={() =>
               setState({ editorMode: false, editorEntry: "none", selectedMarkerId: null, stampActive: false })
             }
           >
             Exit edit
-          </button>
-          <span className="text-xs font-semibold">{selectedPlace?.label ?? "Floor 3"} · Main Building</span>
-          <span className="flex-1" />
-          <button type="button" className={btnClass("ghost")} disabled={state.undoCount === 0}>
+          </Button>
+          <Text size="small" weight="semibold">
+            {selectedPlace?.label ?? "Floor 3"} · Main Building
+          </Text>
+          <Spacer />
+          <Button variant="ghost" disabled={state.undoCount === 0}>
             Undo ({state.undoCount})
-          </button>
-          <button type="button" className={btnClass("ghost")} disabled={state.redoCount === 0}>
+          </Button>
+          <Button variant="ghost" disabled={state.redoCount === 0}>
             Redo
-          </button>
+          </Button>
           <Chip label="Saved" tone="success" />
         </WireBox>
-      )}
+      ) : null}
 
       {/* Tool strip */}
-      {state.editorMode && (
-        <WireBox className="absolute left-1/2 z-25 flex -translate-x-1/2 items-center gap-1 p-1" style={{ top: 82 }}>
+      {state.editorMode ? (
+        <WireBox
+          style={{
+            position: "absolute",
+            top: 82,
+            left: "50%",
+            transform: "translateX(-50%)",
+            zIndex: 25,
+            display: "flex",
+            alignItems: "center",
+            gap: 4,
+            padding: "4px 8px",
+          }}
+        >
+          <Button
+            variant={state.editorRightTab === "devices" ? "primary" : "ghost"}
+            onClick={() => openDrawDevicesPanel(setState)}
+            style={{ fontSize: 10, marginRight: 4 }}
+          >
+            Draw Devices
+          </Button>
           {EDITOR_TOOLS.map((t) => (
-            <button
+            <Button
               key={t}
-              type="button"
-              className={cn(btnClass(state.editorTool === t ? "primary" : "ghost"), "text-[10px]")}
+              variant={state.editorTool === t ? "primary" : "ghost"}
               onClick={() =>
                 setState({
                   editorTool: t,
@@ -1089,56 +3052,183 @@ function PrototypeFrame({
                   selectedMarkerId: t === "Select" ? state.selectedMarkerId : null,
                 })
               }
+              style={{ fontSize: 10 }}
             >
               {t}
-            </button>
+            </Button>
           ))}
         </WireBox>
-      )}
+      ) : null}
 
       {/* Map canvas */}
       <div
-        className="absolute bottom-0 left-0 bg-muted/40"
         style={{
+          position: "absolute",
           top: state.editorMode ? 76 : 36,
+          left: 0,
           right: rightPanelWidth,
+          bottom: 0,
+          background: isLocationFlowMap
+            ? theme.fill.quaternary
+            : isFirstVisitUpload
+              ? theme.bg.editor
+              : theme.fill.quaternary,
+          cursor: "default",
         }}
         onClick={() => {
-          if (state.searchFocused) setState({ searchFocused: false, searchQuery: "" })
+          if (state.searchFocused) setState({ searchFocused: false, searchQuery: "" });
         }}
       >
-        <svg width="100%" height="100%" className="absolute inset-0 opacity-35">
+        {isFirstVisitUpload ? <GlobeBackdrop /> : null}
+
+        {isLocationFlowMap ? (
+          state.locationPinned || isAligningFloorplan || isSelectingSites ? (
+            <ZoomedStreetMapBackdrop buildingOutline={locatingBuildingOutline} center={locatingMapCenter} address={state.locationQuery || undefined} />
+          ) : (
+            <WorldMapBackdrop />
+          )
+        ) : null}
+
+        {!isFirstVisitUpload && !isLocationFlowMap ? (
+        <svg width="100%" height="100%" style={{ position: "absolute", inset: 0, opacity: state.orgHasFloorplans ? 0.35 : 0.2 }}>
           <defs>
-            <pattern id="editor-grid" width="32" height="32" patternUnits="userSpaceOnUse">
-              <path d="M 32 0 L 0 0 0 32" fill="none" stroke="oklch(0.35 0.02 230)" strokeWidth="0.5" />
+            <pattern id="grid" width="32" height="32" patternUnits="userSpaceOnUse">
+              <path d="M 32 0 L 0 0 0 32" fill="none" stroke={theme.stroke.tertiary} strokeWidth="0.5" />
             </pattern>
           </defs>
-          <rect width="100%" height="100%" fill="url(#editor-grid)" />
-          <rect x="18%" y="22%" width="52%" height="48%" fill="none" stroke="oklch(0.45 0.02 230)" strokeWidth="1.5" />
-          <rect x="28%" y="32%" width="18%" height="14%" fill="none" stroke="oklch(0.45 0.02 230)" strokeWidth="1" />
-          <rect x="52%" y="38%" width="12%" height="20%" fill="none" stroke="oklch(0.45 0.02 230)" strokeWidth="1" />
+          <rect width="100%" height="100%" fill="url(#grid)" />
+          {state.orgHasFloorplans ? (
+            <>
+              <rect x="18%" y="22%" width="52%" height="48%" fill="none" stroke={theme.stroke.secondary} strokeWidth="1.5" />
+              <rect x="28%" y="32%" width="18%" height="14%" fill="none" stroke={theme.stroke.secondary} strokeWidth="1" />
+              <rect x="52%" y="38%" width="12%" height="20%" fill="none" stroke={theme.stroke.secondary} strokeWidth="1" />
+            </>
+          ) : (
+            <>
+              <rect x="8%" y="12%" width="84%" height="76%" fill={theme.fill.tertiary} opacity="0.4" />
+              <text x="50%" y="48%" fill={theme.text.tertiary} fontSize="12" textAnchor="middle">
+                Satellite basemap
+              </text>
+            </>
+          )}
         </svg>
+        ) : null}
 
-        <EditorCanvasOverlays state={state} />
+        {state.orgHasFloorplans ? <EditorCanvasOverlays state={state} /> : null}
 
-        {showDropHint && (
-          <WireBox className="absolute inset-3 z-15 flex items-center justify-center border-dashed bg-muted/30">
-            <div className="space-y-1.5 text-center">
-              <div className="text-sm font-semibold">Drop floorplan to attach + align</div>
-              <div className="text-xs text-muted-foreground">Path B: one drop replaces 3-step wizard when Place is selected</div>
-            </div>
+        {showDropHint ? (
+          <WireBox
+            style={{
+              position: "absolute",
+              inset: 12,
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "center",
+              borderStyle: "dashed",
+              background: theme.fill.tertiary,
+              zIndex: 15,
+            }}
+          >
+            <Stack gap={6} style={{ alignItems: "center" }}>
+              <Text weight="semibold">Drop floorplan to attach + align</Text>
+              <Text size="small" tone="secondary">
+                Path B: one drop replaces 3-step wizard when Place is selected
+              </Text>
+            </Stack>
           </WireBox>
-        )}
+        ) : null}
 
-        {MARKERS.map((marker) => {
-          const selected = state.selectedMarkerId === marker.id
+        {isFirstVisitUpload ? (
+          <FirstVisitUploadCard
+            uploadedFiles={uploadedFiles}
+            onUploadFile={simulateFileUpload}
+            onRemoveFile={removeUploadedFile}
+            onSetLocation={beginLocationForFile}
+          />
+        ) : null}
+
+        {isLocatingFloorplan && locatingFile ? (
+          <LocationFlowSidePanel step="search" fileName={locatingFile.fileName} onBack={cancelLocationSetup}>
+            <LocationSearchStepContent
+              query={state.locationQuery}
+              searchFocused={state.locationSearchFocused ?? false}
+              locationPinned={state.locationPinned ?? false}
+              onFocus={() => setState({ locationSearchFocused: true })}
+              onChange={(value) =>
+                setState({
+                  locationQuery: value,
+                  locationSearchFocused: true,
+                  locationPinned: false,
+                  selectedAddressId: null,
+                })
+              }
+              onSelectSuggestion={selectVerkadaAddress}
+              onSubmitTyped={submitTypedAddress}
+              onContinueToAlign={confirmFloorplanLocation}
+            />
+          </LocationFlowSidePanel>
+        ) : null}
+
+        {isAligningFloorplan ? (
+          <>
+            <FloorplanRasterOverlay
+              opacity={state.alignOpacity ?? 0.65}
+              scale={state.alignScale ?? 1}
+              rotation={state.alignRotation ?? 0}
+              centerX={locatingMapCenter.x}
+              centerY={locatingMapCenter.y}
+              offsetX={state.alignOffsetX ?? 0}
+              offsetY={state.alignOffsetY ?? 0}
+            />
+            <LocationFlowSidePanel step="align" fileName={locatingFile?.fileName ?? "Floorplan"}>
+              <AlignmentStepContent
+                fileName={locatingFile?.fileName ?? "Floorplan"}
+                opacity={state.alignOpacity ?? 0.65}
+                scale={state.alignScale ?? 1}
+                rotation={state.alignRotation ?? 0}
+                onOpacityChange={(v) => setState({ alignOpacity: v })}
+                onScaleChange={(v) => setState({ alignScale: v })}
+                onRotationChange={(v) => setState({ alignRotation: v })}
+                onConfirm={confirmAlignment}
+              />
+            </LocationFlowSidePanel>
+          </>
+        ) : null}
+
+        {isSelectingSites ? (
+          <>
+            <CroppedFloorplanOnMap
+              scale={state.alignScale ?? 1}
+              rotation={state.alignRotation ?? 0}
+              offsetX={state.alignOffsetX ?? 0}
+              offsetY={state.alignOffsetY ?? 0}
+            />
+            <LocationFlowSidePanel
+              step="select-sites"
+              fileName={locatingFile?.fileName ?? "Floorplan"}
+              onBack={backFromSiteSelection}
+            >
+              <SiteSelectionStepContent
+                query={state.siteSearchQuery ?? ""}
+                selectedSiteIds={state.selectedSiteIds ?? []}
+                onQueryChange={(value) => setState({ siteSearchQuery: value })}
+                onToggleSite={toggleSiteSelection}
+                onConfirm={confirmSiteSelection}
+              />
+            </LocationFlowSidePanel>
+          </>
+        ) : null}
+
+        {state.orgHasFloorplans
+          ? MARKERS.map((marker) => {
+          const selected = state.selectedMarkerId === marker.id;
           return (
             <button
               key={marker.id}
               type="button"
               title={marker.label}
               onClick={(e) => {
-                e.stopPropagation()
+                e.stopPropagation();
                 if (state.editorMode)
                   setState({
                     selectedMarkerId: marker.id,
@@ -1146,336 +3236,536 @@ function PrototypeFrame({
                     editorRightTab: "properties",
                     showFovCones: marker.kind === "Camera",
                     stampActive: false,
-                  })
+                  });
               }}
-              className={cn(
-                "absolute rounded-full border-2 -translate-x-1/2 -translate-y-1/2 p-0 transition-all",
-                state.editorMode ? "size-2.5 cursor-pointer" : "size-1.5 cursor-default",
-                selected ? "border-sky-400" : "border-border",
-                marker.status === "Online" ? "bg-emerald-400/85" : "bg-red-400/85",
-              )}
-              style={{ left: `${marker.x}%`, top: `${marker.y}%` }}
+              style={{
+                position: "absolute",
+                left: `${marker.x}%`,
+                top: `${marker.y}%`,
+                transform: "translate(-50%, -50%)",
+                width: state.editorMode ? 10 : 7,
+                height: state.editorMode ? 10 : 7,
+                borderRadius: 999,
+                border: `2px solid ${selected ? theme.accent.primary : theme.stroke.secondary}`,
+                background: marker.status === "Online" ? theme.fill.secondary : theme.diff.removed,
+                cursor: state.editorMode ? "pointer" : "default",
+                padding: 0,
+              }}
             />
-          )
-        })}
+          );
+        })
+          : null}
 
-        <div className="absolute right-[180px] top-3 font-mono text-[10px] text-muted-foreground/50">
-          {selectedPlace?.kind === "floor" ? `${selectedPlace.label} · Main Bldg` : "Floor 3 · Main Bldg"}
-        </div>
+        {!isFirstVisitFlow ? (
+        <Text
+          size="small"
+          tone="tertiary"
+          style={{ position: "absolute", top: 12, right: 180, fontSize: 10, fontFamily: "monospace" }}
+        >
+          {!state.orgHasFloorplans
+            ? "Basemap · no floorplan"
+            : selectedPlace?.kind === "floor"
+              ? `${selectedPlace.label} · Main Bldg`
+              : "Floor 3 · Main Bldg"}
+        </Text>
+        ) : null}
 
-        {!state.editorMode && (
-          <WireBox className="absolute right-3 top-3 z-20 w-40 overflow-hidden p-0">
-            <button
-              type="button"
-              onClick={(e) => {
-                e.stopPropagation()
-                setState({ sitePickerOpen: !state.sitePickerOpen })
-              }}
-              className="flex w-full cursor-pointer items-center justify-between border-none bg-transparent px-2.5 py-2 text-[11px]"
-            >
-              <span>Sites: HQ-MAIN</span>
-              <span className="text-muted-foreground">12 places</span>
-            </button>
-            {state.sitePickerOpen && (
-              <div className="border-t border-border/50">
-                {["HQ-MAIN", "EC-01", "WH-01"].map((site) => (
-                  <PanelListRow key={site} label={site} trailing={site === "HQ-MAIN" ? "active" : undefined} />
-                ))}
-              </div>
-            )}
-            <div className="border-t border-border/50 p-2.5">
-              <div className="flex items-center justify-between text-xs">
-                <span>Alerts & Events</span>
-                <Chip label="2" tone="warning" />
-              </div>
-              <div className="mt-1.5 space-y-1">
-                <div className="text-xs text-muted-foreground">Door forced open · Lobby</div>
-                <div className="text-xs text-muted-foreground">After-hours motion · Dock 4</div>
-              </div>
-            </div>
-          </WireBox>
-        )}
-
-        <div className="absolute bottom-3 right-3 flex flex-col gap-1">
-          {["+", "−"].map((z) => (
-            <WireBox key={z} className="grid size-7 place-items-center text-sm">{z}</WireBox>
-          ))}
-        </div>
-
-        <button
-          type="button"
-          className={cn(btnClass("secondary"), "absolute bottom-3 left-3 text-[10px]")}
-          onClick={(e) => {
-            e.stopPropagation()
-            setState({ layersClusterOpen: !state.layersClusterOpen })
+        {/* Site + Alerts cluster — hidden in editor mode and first visit landing */}
+        {!state.editorMode && !isFirstVisitFlow ? (
+        <WireBox
+          style={{
+            position: "absolute",
+            top: 12,
+            right: 12,
+            width: 160,
+            zIndex: 20,
+            padding: 0,
+            overflow: "hidden",
           }}
         >
-          Layers · {state.activeLayers.length} on
-        </button>
+          <button
+            type="button"
+            onClick={(e) => {
+              e.stopPropagation();
+              setState({ sitePickerOpen: !state.sitePickerOpen });
+            }}
+            style={{
+              width: "100%",
+              display: "flex",
+              justifyContent: "space-between",
+              alignItems: "center",
+              padding: "8px 10px",
+              border: "none",
+              background: "transparent",
+              color: theme.text.primary,
+              cursor: "pointer",
+              fontSize: 11,
+            }}
+          >
+            <span>{state.orgHasFloorplans ? "Sites: HQ-MAIN" : "156 devices"}</span>
+            <span style={{ color: theme.text.tertiary }}>{state.orgHasFloorplans ? "12 places" : "not on map"}</span>
+          </button>
+          {state.sitePickerOpen && state.orgHasFloorplans ? (
+            <Stack gap={0} style={{ borderTop: `1px solid ${theme.stroke.tertiary}` }}>
+              {["HQ-MAIN", "EC-01", "WH-01"].map((site) => (
+                <PanelListRow key={site} label={site} trailing={site === "HQ-MAIN" ? "active" : undefined} />
+              ))}
+            </Stack>
+          ) : null}
+          <div style={{ borderTop: `1px solid ${theme.stroke.tertiary}`, padding: "8px 10px" }}>
+            <Row justify="space-between">
+              <Text size="small">Alerts & Events</Text>
+              {state.orgHasFloorplans ? <Chip label="2" tone="warning" /> : <Chip label="0" tone="neutral" />}
+            </Row>
+            {state.orgHasFloorplans ? (
+              <Stack gap={4} style={{ marginTop: 6 }}>
+                <Text size="small" tone="secondary">
+                  Door forced open · Lobby
+                </Text>
+                <Text size="small" tone="secondary">
+                  After-hours motion · Dock 4
+                </Text>
+              </Stack>
+            ) : (
+              <Text size="small" tone="tertiary" style={{ marginTop: 6 }}>
+                Alerts will map to floor locations after you upload a floorplan.
+              </Text>
+            )}
+          </div>
+        </WireBox>
+        ) : null}
 
-        {state.layersClusterOpen && (
-          <WireBox className="absolute bottom-12 left-3 z-20 w-[220px] p-2.5">
-            <div className="text-[11px] font-semibold">Layers</div>
-            <div className="text-xs text-muted-foreground">31 devices · None selected</div>
-            <div className="mt-2 grid grid-cols-2 gap-2">
-              <div className="space-y-1">
-                <div className="text-[10px] text-muted-foreground">Devices</div>
+        {/* Zoom controls */}
+        <Stack gap={4} style={{ position: "absolute", bottom: 12, right: 12 }}>
+          {["+", "−"].map((z) => (
+            <WireBox key={z} style={{ width: 28, height: 28, display: "grid", placeItems: "center", fontSize: 14 }}>
+              {z}
+            </WireBox>
+          ))}
+        </Stack>
+
+        {/* Layers cluster toggle */}
+        {!isFirstVisitFlow ? (
+        <Button
+          variant="secondary"
+          onClick={(e) => {
+            e.stopPropagation();
+            setState({ layersClusterOpen: !state.layersClusterOpen });
+          }}
+          style={{ position: "absolute", bottom: 12, left: 12, fontSize: 10 }}
+        >
+          Layers · {state.orgHasFloorplans ? `${state.activeLayers.length} on` : "none"}
+        </Button>
+        ) : null}
+
+        {!isFirstVisitFlow && state.layersClusterOpen ? (
+          <WireBox style={{ position: "absolute", bottom: 48, left: 12, width: 220, padding: 10, zIndex: 20 }}>
+            <Text weight="semibold" style={{ fontSize: 11 }}>
+              Layers
+            </Text>
+            <Text size="small" tone="secondary">
+              {state.orgHasFloorplans ? "31 devices · None selected" : "156 devices · not on map yet"}
+            </Text>
+            <Grid columns={2} gap={8} style={{ marginTop: 8 }}>
+              <Stack gap={4}>
+                <Text size="small" tone="tertiary" style={{ fontSize: 10 }}>
+                  Devices
+                </Text>
                 {["Cameras", "Doors", "Sensors"].map((d) => (
-                  <div key={d} className="text-xs">[x] {d}</div>
+                  <Text key={d} size="small">
+                    [x] {d}
+                  </Text>
                 ))}
-              </div>
-              <div className="space-y-1">
-                <div className="text-[10px] text-muted-foreground">Data overlay</div>
+              </Stack>
+              <Stack gap={4}>
+                <Text size="small" tone="tertiary" style={{ fontSize: 10 }}>
+                  Data overlay
+                </Text>
                 {["Status", "Coverage", "Events"].map((d, i) => (
-                  <div key={d} className="text-xs">{i === 0 ? "(o)" : "( )"} {d}</div>
+                  <Text key={d} size="small">
+                    {i === 0 ? "(o)" : "( )"} {d}
+                  </Text>
                 ))}
-              </div>
-            </div>
-            <div className="mt-2 flex gap-2">
-              <span className="rounded-full border border-border px-2 py-0.5 text-[10px]">Satellite</span>
-              <span className="rounded-full border border-border px-2 py-0.5 text-[10px]">Dark</span>
-            </div>
+              </Stack>
+            </Grid>
+            <Row gap={8} style={{ marginTop: 8 }}>
+              <Pill size="sm">Satellite</Pill>
+              <Pill size="sm">Dark</Pill>
+            </Row>
           </WireBox>
-        )}
+        ) : null}
 
-        {state.activeLayers.length > 0 && !state.layersClusterOpen && (
-          <div className="absolute bottom-12 right-3 flex flex-col items-end gap-1">
+        {/* Active layer pills */}
+        {!isFirstVisitFlow && state.activeLayers.length > 0 && !state.layersClusterOpen ? (
+          <Stack gap={4} style={{ position: "absolute", bottom: 48, right: 12, alignItems: "flex-end" }}>
             {state.activeLayers.slice(0, 3).map((l) => (
               <Chip key={l} label={l} />
             ))}
-          </div>
-        )}
+          </Stack>
+        ) : null}
       </div>
 
-      {/* Left rail */}
-      <WireBox className="absolute bottom-0 left-0 top-9 z-20 flex w-10 flex-col items-center gap-1.5 rounded-none border-b-0 border-l-0 border-t-0 pt-2">
-        <button type="button" className={btnClass("ghost", "px-1 py-0.5 text-[10px]")} onClick={() => setState({ filesFlyoutOpen: !state.filesFlyoutOpen })}>
+      {/* Left rail + panel — hidden on first visit landing */}
+      {!isFirstVisitFlow ? (
+      <>
+      <WireBox
+        style={{
+          position: "absolute",
+          top: 36,
+          left: 0,
+          bottom: 0,
+          width: 40,
+          borderRadius: 0,
+          borderTop: "none",
+          borderBottom: "none",
+          borderLeft: "none",
+          display: "flex",
+          flexDirection: "column",
+          alignItems: "center",
+          paddingTop: 8,
+          gap: 6,
+          zIndex: 20,
+        }}
+      >
+        <Button variant="ghost" style={{ fontSize: 10, padding: "2px 4px" }} onClick={() => setState({ filesFlyoutOpen: !state.filesFlyoutOpen })}>
           Menu
-        </button>
+        </Button>
         {RAIL_ITEMS.map((item) => {
           const active =
             state.rail === item.id &&
             !state.selectedPlaceId &&
             !state.editorMode &&
-            !state.searchFocused
+            !state.searchFocused;
           return (
             <button
               key={item.id}
               type="button"
               title={item.label}
               onClick={() => switchRail(item.id)}
-              className={cn(
-                "size-7 cursor-pointer rounded border text-[10px] transition-colors",
-                active ? "border-border bg-muted/60" : "border-border/40 bg-transparent hover:bg-muted/40",
-              )}
+              style={{
+                width: 28,
+                height: 28,
+                borderRadius: 4,
+                border: `1px solid ${active ? theme.stroke.primary : theme.stroke.tertiary}`,
+                background: active ? theme.fill.secondary : "transparent",
+                color: theme.text.primary,
+                fontSize: 10,
+                cursor: "pointer",
+              }}
             >
               {item.abbr}
             </button>
-          )
+          );
         })}
       </WireBox>
 
       {/* Left panel */}
       <WireBox
-        className="absolute bottom-0 z-20 flex w-[220px] flex-col overflow-hidden rounded-none border-b-0 border-t-0 p-0"
-        style={{ top: state.editorMode ? 76 : 36, left: 40 }}
+        style={{
+          position: "absolute",
+          top: state.editorMode ? 76 : 36,
+          left: 40,
+          bottom: 0,
+          width: 220,
+          borderRadius: 0,
+          borderTop: "none",
+          borderBottom: "none",
+          display: "flex",
+          flexDirection: "column",
+          zIndex: 20,
+          padding: 0,
+          overflow: "hidden",
+        }}
       >
-        <div className="border-b border-border/50 p-2">
+        <div style={{ padding: 8, borderBottom: `1px solid ${theme.stroke.tertiary}` }}>
           {!state.editorMode && state.searchFocused ? (
-            <div className="flex items-center gap-1.5">
-              <input
+            <Row gap={6}>
+              <TextInput
                 value={state.searchQuery}
-                onChange={(e) => setState({ searchQuery: e.target.value })}
+                onChange={(value) => setState({ searchQuery: value })}
                 placeholder="Search Verkada Maps…"
-                className="min-w-0 flex-1 rounded border border-border bg-muted/50 px-2 py-1.5 text-[11px] outline-none"
+                type="search"
+                style={{ flex: 1, minWidth: 0 }}
               />
-              <button type="button" className={btnClass("ghost")} onClick={() => setState({ searchFocused: false, searchQuery: "" })}>
+              <Button variant="ghost" onClick={() => setState({ searchFocused: false, searchQuery: "" })}>
                 x
-              </button>
-            </div>
+              </Button>
+            </Row>
           ) : !state.editorMode ? (
-            <button
-              type="button"
-              className={cn(btnClass("secondary"), "w-full justify-start text-left text-[11px]")}
+            <Button
+              variant="secondary"
               onClick={() => setState({ searchFocused: true })}
+              style={{ width: "100%", justifyContent: "flex-start", fontSize: 11 }}
             >
               Search Verkada Maps…
-            </button>
+            </Button>
           ) : (
-            <div className="py-1 text-xs text-muted-foreground">Floor context</div>
+            <Text size="small" tone="tertiary" style={{ padding: "4px 0" }}>
+              Floor context
+            </Text>
           )}
         </div>
-        <div className="min-h-0 flex-1">
+        <div style={{ flex: 1, minHeight: 0 }}>
           <LeftPanelContent state={state} setState={setState} />
         </div>
       </WireBox>
+      </>
+      ) : null}
 
       {/* Editor right panel */}
-      {state.editorMode && (
+      {state.editorMode ? (
         <WireBox
-          className="absolute bottom-0 right-0 z-20 overflow-hidden rounded-none border-b-0 border-r-0 border-t-0 p-0"
-          style={{ top: 36, width: rightPanelWidth }}
+          style={{
+            position: "absolute",
+            top: 36,
+            right: 0,
+            bottom: 0,
+            width: rightPanelWidth,
+            borderRadius: 0,
+            borderTop: "none",
+            borderBottom: "none",
+            borderRight: "none",
+            zIndex: 20,
+            padding: 0,
+            overflow: "hidden",
+          }}
         >
           <EditorRightPanel state={state} setState={setState} />
         </WireBox>
-      )}
+      ) : null}
 
-      {/* Files flyout */}
-      {state.filesFlyoutOpen && (
-        <WireBox className="absolute left-12 top-[72px] z-40 w-[200px] p-2.5">
-          <div className="flex items-center justify-between">
-            <div className="text-[11px] font-semibold">Files</div>
-            <button type="button" className={btnClass("ghost")} onClick={() => setState({ filesFlyoutOpen: false })}>
+      {/* Files flyout — not shown on first visit landing (drop zone is inline) */}
+      {state.filesFlyoutOpen && !isFirstVisitFlow ? (
+        <WireBox
+          style={{
+            position: "absolute",
+            top: 72,
+            left: 48,
+            width: 200,
+            zIndex: 40,
+            padding: 10,
+          }}
+        >
+          <Row justify="space-between" align="center">
+            <Text weight="semibold" style={{ fontSize: 11 }}>
+              Files
+            </Text>
+            <Button variant="ghost" onClick={() => setState({ filesFlyoutOpen: false })}>
               x
-            </button>
-          </div>
-          <WireBox className="mt-2 border-dashed bg-muted/30 p-4 text-center">
-            <div className="text-xs text-muted-foreground">Drop files here</div>
-            <button type="button" className={cn(btnClass("primary"), "mt-2")}>Upload</button>
+            </Button>
+          </Row>
+          <WireBox
+            style={{
+              marginTop: 8,
+              padding: 16,
+              borderStyle: "dashed",
+              textAlign: "center",
+              background: theme.fill.tertiary,
+            }}
+          >
+            <Text size="small" tone="secondary">
+              Drop files here
+            </Text>
+            <Button variant="primary" style={{ marginTop: 8 }}>
+              Upload
+            </Button>
           </WireBox>
-          <div className="mt-2.5 space-y-1.5">
-            <div className="text-[10px] uppercase text-muted-foreground">Unplaced</div>
-            <div className="flex items-center justify-between">
-              <span className="text-xs">Floor-4-draft.pdf</span>
-              <button type="button" className={btnClass("secondary")}>Bind to Place</button>
-            </div>
-          </div>
+          <Stack gap={6} style={{ marginTop: 10 }}>
+            <Text size="small" tone="tertiary" style={{ fontSize: 10, textTransform: "uppercase" }}>
+              Unplaced
+            </Text>
+            {state.orgHasFloorplans ? (
+              <Row justify="space-between" align="center">
+                <Text size="small">Floor-4-draft.pdf</Text>
+                <Button variant="secondary" style={{ fontSize: 10 }}>
+                  Bind to Place
+                </Button>
+              </Row>
+            ) : (
+              <Text size="small" tone="secondary">
+                Uploaded files appear here before a building exists.
+              </Text>
+            )}
+          </Stack>
         </WireBox>
-      )}
+      ) : null}
     </WireBox>
-  )
+  );
 }
 
-// ─── Main export ──────────────────────────────────────────────────────────────
-
 export function EditorPrototype() {
-  const [state, setStateRaw] = useLocalStorageState<AppState>("maps2-editor-mock", EDITOR_DEFAULT)
-  const [activePreset, setActivePreset] = useLocalStorageState<string>("maps2-editor-preset", "editor-idle")
-  const [workspaceFocus, setWorkspaceFocus] = useLocalStorageState<WorkspaceFocus>("maps2-workspace-focus", "editor")
+  const [state, setStateRaw] = useCanvasState<AppState>("maps2-nav-mock", {
+    rail: "map",
+    searchFocused: false,
+    searchQuery: "",
+    selectedPlaceId: null,
+    placeTab: "overview",
+    editorMode: false,
+    editorEntry: "none",
+    editorTool: "Select",
+    editorRightTab: "tools",
+    selectedMarkerId: null,
+    stampActive: false,
+    showFovCones: false,
+    undoCount: 0,
+    redoCount: 0,
+    activeLayers: [],
+    expandedCollectionId: null,
+    collTab: "mine",
+    sitePickerOpen: false,
+    filesFlyoutOpen: false,
+    layersClusterOpen: false,
+    orgHasFloorplans: false,
+    uploadStage: "idle",
+    uploadedFiles: [],
+    locatingFileId: null,
+    locationQuery: "",
+    locationSearchFocused: false,
+    locationPinned: false,
+    selectedAddressId: null,
+    locationPinX: 48,
+    locationPinY: 52,
+    alignOpacity: 0.65,
+    alignScale: 1,
+    alignRotation: 0,
+    alignOffsetX: 0,
+    alignOffsetY: 0,
+    siteSearchQuery: "",
+    selectedSiteIds: [],
+  });
+  const [activePreset, setActivePreset] = useCanvasState<string>("maps2-nav-preset", "first-visit");
+  const [workspaceFocus, setWorkspaceFocus] = useCanvasState<WorkspaceFocus>("maps2-workspace-focus", "editor");
 
   const setState = useCallback(
     (patch: Partial<AppState>) => setStateRaw((prev) => mergeAppState(prev, patch)),
     [setStateRaw],
-  )
+  );
 
   const jumpToPreset = useCallback(
     (id: string) => {
-      const preset = PRESET_STATES.find((p) => p.id === id)
-      if (!preset) return
-      setActivePreset(id)
-      const base = EDITOR_PRESETS.some((p) => p.id === id) ? EDITOR_DEFAULT : DEFAULT_STATE
-      setStateRaw(mergeAppState(base, preset.state))
+      const preset = PRESET_STATES.find((p) => p.id === id);
+      if (!preset) return;
+      setActivePreset(id);
+      const base = FIRST_VISIT_PRESET_IDS.has(id)
+          ? getFirstVisitDefault()
+          : EDITOR_PRESETS.some((p) => p.id === id)
+            ? getEditorDefault()
+            : getDefaultState();
+      setStateRaw(mergeAppState(base, preset.state));
     },
     [setActivePreset, setStateRaw],
-  )
+  );
 
-  const currentPreset = PRESET_STATES.find((p) => p.id === activePreset) ?? EDITOR_PRESETS[2]
-  const showDropHint = activePreset === "editor-drop"
-  const visiblePresets = workspaceFocus === "editor" ? EDITOR_PRESETS : PRESET_STATES
+  const currentPreset = PRESET_STATES.find((p) => p.id === activePreset) ?? EDITOR_PRESETS[0];
+  const showDropHint = activePreset === "editor-drop";
+
+  const visiblePresets = workspaceFocus === "editor" ? EDITOR_PRESETS : PRESET_STATES;
 
   return (
-    <div className="space-y-5">
-      <div className="space-y-2">
-        <div className="flex flex-wrap gap-1.5">
-          <button
-            type="button"
+    <Stack gap={20}>
+      <Stack gap={6}>
+        <H1>Azalea&apos;s Maps 2.0 Canvas</H1>
+        <Text tone="secondary">
+          Editor experience workspace — first visit to Maps (state 0), in-context edit mode, tool palette,
+          device placement, and structural drawing. Built on the{" "}
+          <Link href="https://ankush-rustagi.github.io/maps-2-0-nav-audit/">Navigation Audit</Link> IA with
+          Maps v1 PRD editor MVP scope.
+        </Text>
+        <Row gap={6} wrap>
+          <Pill
+            active={workspaceFocus === "editor"}
             onClick={() => setWorkspaceFocus("editor")}
-            className={cn(
-              "rounded-full border px-2.5 py-0.5 text-[10px] transition-colors",
-              workspaceFocus === "editor"
-                ? "bg-foreground text-background border-foreground"
-                : "border-border text-muted-foreground hover:border-foreground/40",
-            )}
+            size="sm"
           >
             Editor focus
-          </button>
-          <button
-            type="button"
+          </Pill>
+          <Pill
+            active={workspaceFocus === "full"}
             onClick={() => setWorkspaceFocus("full")}
-            className={cn(
-              "rounded-full border px-2.5 py-0.5 text-[10px] transition-colors",
-              workspaceFocus === "full"
-                ? "bg-foreground text-background border-foreground"
-                : "border-border text-muted-foreground hover:border-foreground/40",
-            )}
+            size="sm"
           >
             Full IA
-          </button>
-          <span className="rounded-full border border-border px-2.5 py-0.5 text-[10px] text-muted-foreground">
-            {EDITOR_PRESETS.length} editor states
-          </span>
-          <span className="rounded-full border border-border px-2.5 py-0.5 text-[10px] text-muted-foreground">
-            PRD M2 MVP
-          </span>
-        </div>
-      </div>
+          </Pill>
+          <Pill size="sm">{EDITOR_PRESETS.length} editor states</Pill>
+          <Pill size="sm">PRD M2 MVP</Pill>
+        </Row>
+      </Stack>
 
-      <div className="grid grid-cols-1 items-start gap-4 lg:grid-cols-[220px_1fr]">
-        <div className="space-y-2">
-          <h3 className="text-sm font-semibold">{workspaceFocus === "editor" ? "Editor states" : "All states"}</h3>
-          <div className="space-y-1">
+      <Grid columns="220px 1fr" gap={16} align="start">
+        <Stack gap={8}>
+          <H3>{workspaceFocus === "editor" ? "Editor states" : "All states"}</H3>
+          <Stack gap={4}>
             {visiblePresets.map((preset) => (
-              <button
+              <Button
                 key={preset.id}
-                type="button"
-                title={preset.description}
+                variant={activePreset === preset.id ? "primary" : "ghost"}
                 onClick={() => jumpToPreset(preset.id)}
-                className={cn(
-                  btnClass(activePreset === preset.id ? "primary" : "ghost"),
-                  "w-full text-left",
-                )}
+                style={{ width: "100%", justifyContent: "flex-start", fontSize: 10, textAlign: "left" }}
+                title={preset.description}
               >
                 {preset.label}
-              </button>
+              </Button>
             ))}
-          </div>
-        </div>
+          </Stack>
+        </Stack>
 
-        <div className="space-y-3">
-          <div className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
-            <span>State:</span>
-            <span className="font-semibold text-foreground">{stateLabel(state)}</span>
-            <button type="button" className={btnClass("ghost")} onClick={() => jumpToPreset("editor-idle")}>
-              Reset editor
-            </button>
-          </div>
+        <Stack gap={12}>
+          <Row gap={8} align="center" wrap>
+            <Text size="small" tone="secondary">
+              State:
+            </Text>
+            <Text size="small" weight="semibold">
+              {stateLabel(state)}
+            </Text>
+            <Button variant="ghost" onClick={() => jumpToPreset("first-visit")}>
+              Reset to first visit
+            </Button>
+            <Button variant="ghost" onClick={() => jumpToPreset("editor-idle")}>
+              Jump to editor idle
+            </Button>
+          </Row>
 
           <PrototypeFrame state={state} setState={setState} showDropHint={showDropHint} />
 
-          <Callout variant="info" title={currentPreset.label}>
+          <Callout tone="info" title={currentPreset.label}>
             {currentPreset.description}
           </Callout>
-        </div>
-      </div>
+        </Stack>
+      </Grid>
 
-      <div className="space-y-4 border-t border-border/50 pt-6">
-        <div>
-          <h2 className="text-lg font-semibold">Editor layout</h2>
-          <p className="mt-1 text-sm text-muted-foreground">
-            Hybrid entry: Manage Maps admin home (state 1) or in-context from Place card (state 2). Edit mode keeps
-            the same map chrome but adds a top bar (exit, undo/redo), center tool strip, left floor context, and right
-            panel (tools / devices / properties).
-          </p>
-        </div>
-        <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
-          <div className="space-y-1">
-            <div className="text-sm font-semibold">Left panel</div>
-            <p className="text-xs text-muted-foreground">Floor breadcrumb, placed devices, unplaced device shortcuts</p>
-          </div>
-          <div className="space-y-1">
-            <div className="text-sm font-semibold">Canvas</div>
-            <p className="text-xs text-muted-foreground">Tool overlays: walls, FOV cones, cables, rulers, areas, stamp cursor</p>
-          </div>
-          <div className="space-y-1">
-            <div className="text-sm font-semibold">Right panel (340px target)</div>
-            <p className="text-xs text-muted-foreground">Tools grouped by Structural / Devices / Paths / Space — swaps to properties per selection</p>
-          </div>
-        </div>
-      </div>
+      <Divider />
 
-      <div className="space-y-3">
-        <h2 className="text-lg font-semibold">PRD P0 editor scope</h2>
-        <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
+      <Stack gap={10}>
+        <H2>Editor layout</H2>
+        <Text tone="secondary">
+          Hybrid entry: first visit (0) → upload files with per-file Set location → globe address search (0c) →
+          editor align. Each floorplan can map to a different building address.
+        </Text>
+        <Grid columns={3} gap={12}>
+          <Stack gap={4}>
+            <Text weight="semibold">Left panel</Text>
+            <Text size="small" tone="secondary">
+              Floor breadcrumb, placed devices, unplaced device shortcuts
+            </Text>
+          </Stack>
+          <Stack gap={4}>
+            <Text weight="semibold">Canvas</Text>
+            <Text size="small" tone="secondary">
+              Tool overlays: walls, FOV cones, cables, rulers, areas, stamp cursor
+            </Text>
+          </Stack>
+          <Stack gap={4}>
+            <Text weight="semibold">Right panel (340px target)</Text>
+            <Text size="small" tone="secondary">
+              Tools grouped by Structural / Devices / Paths / Space — swaps to properties per selection
+            </Text>
+          </Stack>
+        </Grid>
+      </Stack>
+
+      <Stack gap={8}>
+        <H2>PRD P0 editor scope</H2>
+        <Grid columns={2} gap={8}>
           {[
             "Draw walls, doors, windows",
             "Place & reposition device tokens",
@@ -1487,14 +3777,16 @@ export function EditorPrototype() {
             "Scale & align floorplan to walls",
             "Undo/redo within session",
           ].map((item) => (
-            <p key={item} className="text-xs text-muted-foreground">· {item}</p>
+            <Text key={item} size="small" tone="secondary">
+              · {item}
+            </Text>
           ))}
-        </div>
-      </div>
+        </Grid>
+      </Stack>
 
-      <p className="text-[11px] text-muted-foreground/70">
-        Source: Maps v1 PRD · IA draft §6 · Site Planner editor · nav audit mock · May 2026 · Azalea Phangsoa
-      </p>
-    </div>
-  )
+      <Text size="small" tone="tertiary">
+        Source: Maps v1 PRD · IA draft §6 · Site Planner editor · nav audit mock · May 2026
+      </Text>
+    </Stack>
+  );
 }
