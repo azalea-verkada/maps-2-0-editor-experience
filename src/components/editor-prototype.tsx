@@ -1,4 +1,4 @@
-import { useCallback, useState, type MouseEvent, type ReactNode } from "react";
+import { useCallback, useState, type CSSProperties, type MouseEvent, type ReactNode } from "react";
 import {
   Button,
   Callout,
@@ -19,6 +19,31 @@ import {
   useCanvasState,
   useHostTheme,
 } from "@/canvas-ui";
+
+const PROTOTYPE_FRAME_MIN_HEIGHT = 480;
+/** Scales with viewport; reserves space for preset chrome above/below the mock. */
+const PROTOTYPE_FRAME_HEIGHT = `clamp(${PROTOTYPE_FRAME_MIN_HEIGHT}px, calc(100dvh - 260px), 880px)`;
+const MAPS_RAIL_WIDTH = 40;
+const MAPS_LEFT_PANEL_WIDTH = 220;
+const MAPS_LEFT_CHROME_WIDTH = MAPS_RAIL_WIDTH + MAPS_LEFT_PANEL_WIDTH;
+
+function getMapsLeftChromeWidth(leftPanelCollapsed: boolean): number {
+  return leftPanelCollapsed ? MAPS_RAIL_WIDTH : MAPS_LEFT_CHROME_WIDTH;
+}
+
+function prototypeFrameShellStyle(
+  theme: ReturnType<typeof useHostTheme>,
+  height: number | string = "100%",
+): CSSProperties {
+  return {
+    position: "relative",
+    width: "100%",
+    height,
+    minHeight: PROTOTYPE_FRAME_MIN_HEIGHT,
+    overflow: "auto",
+    background: theme.bg.editor,
+  };
+}
 
 // ─── Data (mirrors nav audit mock + v3 chrome) ───────────────────────────────
 
@@ -58,13 +83,14 @@ type MockUploadedFile = {
   locationAddress: string | null;
   /** When a single file contains multiple floor layouts (e.g. multi-page PDF). */
   layoutCount?: number;
+  /** Total pages in the uploaded PDF (includes non-layout pages). */
+  pageCount?: number;
 };
 
 type PdfFieldSource = "pdf-title" | "pdf-metadata" | "inferred";
 
 type PdfLayoutAssignment = {
   layoutIndex: number;
-  pdfLabel: string;
   extractedAddress: string;
   address: string;
   floorLevel: string;
@@ -79,11 +105,17 @@ type PdfLayoutAssignment = {
   };
 };
 
-type OrgBuilding = {
+type MockMapBuilding = {
   id: string;
-  name: string;
+  label: string;
   address: string;
-  floors: string[];
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  groundFloorLayoutIndex: number;
+  groundFloorLabel: string;
+  setupComplete: boolean;
 };
 
 type VerkadaAddressSource = "Site" | "Camera" | "Alarms area" | "Access door";
@@ -118,6 +150,8 @@ type AppState = {
   collTab: CollTab;
   sitePickerOpen: boolean;
   filesFlyoutOpen: boolean;
+  /** Collapses the left search/context panel; rail stays visible. */
+  leftPanelCollapsed: boolean;
   layersClusterOpen: boolean;
   /** False = org has devices but no floorplan uploaded yet (first visit to Maps). */
   orgHasFloorplans: boolean;
@@ -144,6 +178,14 @@ type AppState = {
   activeLayoutIndex: number;
   /** Per-layout fields read from PDF + user edits (multi-layout upload). */
   layoutAssignments: PdfLayoutAssignment[];
+  /** Locations/buildings/floors committed from multi-layout PDF review. */
+  committedLayoutLocations: MockLocation[];
+  /** Building footprints shown on map after multi-layout commit. */
+  mapBuildings: MockMapBuilding[];
+  /** Building id for the incomplete-setup prompt on map click. */
+  buildingSetupPromptId: string | null;
+  /** Building id currently in ground-floor align flow after setup CTA. */
+  setupAlignBuildingId: string | null;
 };
 
 type MockOrgSite = {
@@ -180,6 +222,7 @@ function getFirstVisitDefault(): AppState {
     collTab: "mine",
     sitePickerOpen: false,
     filesFlyoutOpen: false,
+    leftPanelCollapsed: false,
     layersClusterOpen: false,
     orgHasFloorplans: false,
     uploadStage: "idle",
@@ -200,6 +243,10 @@ function getFirstVisitDefault(): AppState {
     selectedSiteIds: [],
     activeLayoutIndex: 1,
     layoutAssignments: [],
+    committedLayoutLocations: [],
+    mapBuildings: [],
+    buildingSetupPromptId: null,
+    setupAlignBuildingId: null,
   };
 }
 
@@ -224,6 +271,7 @@ function getEditorDefault(): AppState {
     collTab: "mine",
     sitePickerOpen: false,
     filesFlyoutOpen: false,
+    leftPanelCollapsed: false,
     layersClusterOpen: false,
     orgHasFloorplans: true,
     uploadStage: "idle",
@@ -244,6 +292,10 @@ function getEditorDefault(): AppState {
     selectedSiteIds: [],
     activeLayoutIndex: 1,
     layoutAssignments: [],
+    committedLayoutLocations: [],
+    mapBuildings: [],
+    buildingSetupPromptId: null,
+    setupAlignBuildingId: null,
   };
 }
 
@@ -352,7 +404,120 @@ const MOCK_MULTI_LAYOUT_FILE: MockUploadedFile = {
   fileName: "HQ-All-Floors.pdf",
   locationAddress: null,
   layoutCount: 5,
+  pageCount: 23,
 };
+
+function formatLayoutPageSummary(file: MockUploadedFile): string {
+  const layouts = file.layoutCount ?? 1;
+  const pages = file.pageCount;
+  if (pages && pages > layouts) return `${layouts} layouts of ${pages} pages detected`;
+  return `${layouts} layout${layouts === 1 ? "" : "s"} detected`;
+}
+
+type OrgBuilding = {
+  id: string;
+  name: string;
+  address: string;
+  floors: string[];
+};
+
+function getDisplayLocations(state: AppState): MockLocation[] {
+  if ((state.committedLayoutLocations ?? []).length > 0) return state.committedLayoutLocations ?? [];
+  if (state.orgHasFloorplans) return LOCATIONS;
+  return [];
+}
+
+function buildLocationTreeFromAssignments(assignments: PdfLayoutAssignment[]): MockLocation[] {
+  const result: MockLocation[] = [];
+  const addresses = [...new Set(assignments.map((row) => row.address))];
+
+  addresses.forEach((address, addressIndex) => {
+    const rowsForAddress = assignments.filter((row) => row.address === address);
+    const siteCode = address.includes("502") ? "EC-01" : "HQ-MAIN";
+    const locationLabel = address.includes("502") ? "East Campus" : "HQ Campus";
+    const locationId = `committed-loc-${addressIndex}`;
+
+    result.push({
+      id: locationId,
+      label: locationLabel,
+      kind: "location",
+      site: siteCode,
+      online: 0,
+      total: 156,
+      depth: 0,
+    });
+
+    const buildingNames = [...new Set(rowsForAddress.map((row) => row.building))];
+    buildingNames.forEach((buildingName, buildingIndex) => {
+      const buildingId = `committed-bldg-${addressIndex}-${buildingIndex}`;
+      const floorRows = rowsForAddress
+        .filter((row) => row.building === buildingName)
+        .sort((a, b) => a.layoutIndex - b.layoutIndex);
+
+      result.push({
+        id: buildingId,
+        label: buildingName,
+        kind: "building",
+        site: siteCode,
+        online: 0,
+        total: 0,
+        depth: 1,
+      });
+
+      floorRows.forEach((row) => {
+        result.push({
+          id: `committed-floor-${row.layoutIndex}`,
+          label: row.floorLevel,
+          kind: "floor",
+          site: siteCode,
+          online: 0,
+          total: 0,
+          depth: 2,
+        });
+      });
+    });
+  });
+
+  return result;
+}
+
+function buildMapBuildingsFromAssignments(assignments: PdfLayoutAssignment[]): MockMapBuilding[] {
+  const buildingNames = [...new Set(assignments.map((row) => row.building))];
+  const positions: Record<string, { x: number; y: number; width: number; height: number }> = {
+    "Main Building": { x: 18, y: 22, width: 38, height: 28 },
+    "East Wing": { x: 58, y: 30, width: 22, height: 18 },
+    "Parking Structure": { x: 24, y: 52, width: 28, height: 16 },
+  };
+
+  return buildingNames.map((name, index) => {
+    const rows = assignments
+      .filter((row) => row.building === name)
+      .sort((a, b) => a.layoutIndex - b.layoutIndex);
+    const ground = rows[0];
+    const pos = positions[name] ?? { x: 20 + index * 12, y: 28, width: 24, height: 18 };
+
+    return {
+      id: `map-bldg-${index}`,
+      label: name,
+      address: ground.address,
+      x: pos.x,
+      y: pos.y,
+      width: pos.width,
+      height: pos.height,
+      groundFloorLayoutIndex: ground.layoutIndex,
+      groundFloorLabel: ground.floorLevel,
+      setupComplete: false,
+    };
+  });
+}
+
+function findAddressSuggestionForAddress(address: string): VerkadaAddressSuggestion | undefined {
+  const normalized = address.trim().toLowerCase();
+  return (
+    VERKADA_ADDRESS_SUGGESTIONS.find((s) => s.address.toLowerCase() === normalized)
+    ?? VERKADA_ADDRESS_SUGGESTIONS.find((s) => normalized.includes(s.address.split(",")[0].toLowerCase()))
+  );
+}
 
 const ORG_BUILDINGS: OrgBuilding[] = [
   {
@@ -386,7 +551,6 @@ function isLayoutRowComplete(row: PdfLayoutAssignment): boolean {
 const MOCK_PDF_LAYOUT_ASSIGNMENTS: PdfLayoutAssignment[] = [
   {
     layoutIndex: 1,
-    pdfLabel: "A-101 · Level 1 Lobby",
     extractedAddress: "500 Howard St, San Francisco, CA",
     address: "500 Howard St, San Francisco, CA",
     floorLevel: "Level 1",
@@ -398,7 +562,6 @@ const MOCK_PDF_LAYOUT_ASSIGNMENTS: PdfLayoutAssignment[] = [
   },
   {
     layoutIndex: 2,
-    pdfLabel: "A-102 · Level 2 Office",
     extractedAddress: "500 Howard St, San Francisco, CA",
     address: "500 Howard St, San Francisco, CA",
     floorLevel: "Level 2",
@@ -410,7 +573,6 @@ const MOCK_PDF_LAYOUT_ASSIGNMENTS: PdfLayoutAssignment[] = [
   },
   {
     layoutIndex: 3,
-    pdfLabel: "A-103 · Level 3 Executive",
     extractedAddress: "500 Howard St, San Francisco, CA",
     address: "500 Howard St, San Francisco, CA",
     floorLevel: "Level 3",
@@ -422,7 +584,6 @@ const MOCK_PDF_LAYOUT_ASSIGNMENTS: PdfLayoutAssignment[] = [
   },
   {
     layoutIndex: 4,
-    pdfLabel: "B-001 · East Wing L1",
     extractedAddress: "502 Howard St, San Francisco, CA",
     address: "502 Howard St, San Francisco, CA",
     floorLevel: "Level 1",
@@ -434,7 +595,6 @@ const MOCK_PDF_LAYOUT_ASSIGNMENTS: PdfLayoutAssignment[] = [
   },
   {
     layoutIndex: 5,
-    pdfLabel: "P-1 · Parking Level P1",
     extractedAddress: "500 Howard St, San Francisco, CA",
     address: "500 Howard St, San Francisco, CA",
     floorLevel: "Level P1",
@@ -610,9 +770,9 @@ const EDITOR_PRESETS: { id: string; label: string; description: string; state: P
   },
   {
     id: "upload-multi-layout",
-    label: "0a · 1 file, 5 layouts in file",
+    label: "0a · 1 file, 5 layouts of 23 pages",
     description:
-      "Multi-sheet PDF — layouts appear in a table with address, floor, and building fields pre-filled from PDF reads, plus a suggested building/floor organization.",
+      "Multi-page PDF — 5 floor layouts detected across 23 pages. Layouts appear in a table with address, floor, and building fields pre-filled from PDF reads.",
     state: {
       ...getFirstVisitDefault(),
       uploadStage: "confirmed",
@@ -918,6 +1078,16 @@ function mergeAppState(base: AppState, patch: Partial<AppState>): AppState {
 function stateLabel(s: AppState): string {
   const place = LOCATIONS.find((l) => l.id === s.selectedPlaceId);
   const marker = MARKERS.find((m) => m.id === s.selectedMarkerId);
+  if ((s.committedLayoutLocations ?? []).length > 0 && s.uploadStage === "idle" && !s.setupAlignBuildingId) {
+    const pending = (s.mapBuildings ?? []).filter((b) => !b.setupComplete).length;
+    return pending > 0
+      ? `map › ${s.committedLayoutLocations.length} places added · ${pending} need setup`
+      : "map › locations committed";
+  }
+  if (s.setupAlignBuildingId && s.uploadStage === "aligning") {
+    const building = (s.mapBuildings ?? []).find((b) => b.id === s.setupAlignBuildingId);
+    return `setup › align ${building?.groundFloorLabel ?? "ground floor"}`;
+  }
   if (!s.orgHasFloorplans && s.editorEntry === "manage-home") return "manage maps home (no floorplans)";
   if (!s.orgHasFloorplans && s.uploadStage === "select-sites") {
     const n = (s.selectedSiteIds ?? []).length;
@@ -941,9 +1111,10 @@ function stateLabel(s: AppState): string {
     const layouts = file?.layoutCount ?? 1;
     if (layouts > 1) {
       const assigned = (s.layoutAssignments ?? []).length;
+      const pageNote = file?.pageCount ? ` of ${file.pageCount} pages` : "";
       return assigned > 0
-        ? `first visit › 1 file, ${layouts} layouts › review assignments`
-        : `first visit › 1 file, ${layouts} layouts › layout ${s.activeLayoutIndex ?? 1}`;
+        ? `first visit › 1 file, ${layouts} layouts${pageNote} › review assignments`
+        : `first visit › 1 file, ${layouts} layouts${pageNote} › layout ${s.activeLayoutIndex ?? 1}`;
     }
     const count = s.uploadedFiles.length;
     return count === 1 && layouts === 1
@@ -970,7 +1141,7 @@ function WireBox({
   title,
 }: {
   children?: React.ReactNode;
-  style?: Record<string, string | number>;
+  style?: CSSProperties;
   onClick?: () => void;
   title?: string;
 }) {
@@ -1519,10 +1690,27 @@ function LeftPanelContent({
   setState: (patch: Partial<AppState>) => void;
 }) {
   const theme = useHostTheme();
-  const selectedPlace = LOCATIONS.find((l) => l.id === state.selectedPlaceId) ?? null;
+  const displayLocations = getDisplayLocations(state);
+  const selectedPlace = displayLocations.find((l) => l.id === state.selectedPlaceId) ?? LOCATIONS.find((l) => l.id === state.selectedPlaceId) ?? null;
 
   const goToPlace = useCallback(
     (loc: MockLocation) => {
+      const mapBuilding = state.mapBuildings.find((b) => b.label === loc.label && loc.kind === "building");
+      if (mapBuilding && !mapBuilding.setupComplete) {
+        setState({
+          selectedPlaceId: null,
+          placeTab: "overview",
+          searchFocused: false,
+          searchQuery: "",
+          editorMode: false,
+          editorEntry: "none",
+          selectedMarkerId: null,
+          rail: "map",
+          filesFlyoutOpen: false,
+          buildingSetupPromptId: mapBuilding.id,
+        });
+        return;
+      }
       setState({
         selectedPlaceId: loc.id,
         placeTab: "overview",
@@ -1533,14 +1721,15 @@ function LeftPanelContent({
         selectedMarkerId: null,
         rail: "map",
         filesFlyoutOpen: false,
+        buildingSetupPromptId: null,
       });
     },
-    [setState],
+    [setState, state.mapBuildings],
   );
 
   if (state.searchFocused) {
     const q = state.searchQuery.toLowerCase();
-    const matchedPlaces = q ? LOCATIONS.filter((l) => l.label.toLowerCase().includes(q)) : [];
+    const matchedPlaces = q ? displayLocations.filter((l) => l.label.toLowerCase().includes(q)) : [];
     const matchedDevices = q ? MARKERS.filter((m) => m.label.toLowerCase().includes(q)) : [];
     return (
       <Stack gap={0} style={{ height: "100%", overflow: "auto" }}>
@@ -1789,7 +1978,7 @@ function LeftPanelContent({
   }
 
   if (state.rail === "locations") {
-    if (!state.orgHasFloorplans) {
+    if (displayLocations.length === 0) {
       return (
         <Stack gap={8} style={{ padding: 12, overflow: "auto" }}>
           <Text weight="semibold">All Locations</Text>
@@ -1807,12 +1996,18 @@ function LeftPanelContent({
         <Text size="small" tone="tertiary" style={{ padding: "4px 8px", fontSize: 10, textTransform: "uppercase" }}>
           All Locations
         </Text>
-        {LOCATIONS.map((loc) => (
+        {displayLocations.map((loc) => (
           <PanelListRow
             key={loc.id}
             label={loc.label}
             depth={loc.depth}
-            trailing={`${loc.online}/${loc.total}`}
+            trailing={
+              loc.kind === "building" && state.mapBuildings.some((b) => b.label === loc.label && !b.setupComplete)
+                ? "Setup needed"
+                : loc.kind === "floor"
+                  ? "0 devices"
+                  : `${loc.online}/${loc.total}`
+            }
             onClick={() => goToPlace(loc)}
           />
         ))}
@@ -2018,6 +2213,76 @@ function FloorplanThumbnail() {
   );
 }
 
+function LayoutPagePreview({ layoutIndex, selected }: { layoutIndex: number; selected?: boolean }) {
+  const theme = useHostTheme();
+  const stroke = theme.stroke.secondary;
+  const strokeLight = theme.stroke.tertiary;
+  const fill = theme.fill.tertiary;
+
+  const floorplanByPage: Record<number, ReactNode> = {
+    1: (
+      <>
+        <rect x="14" y="18" width="28" height="20" fill="none" stroke={stroke} strokeWidth="0.75" />
+        <rect x="18" y="22" width="8" height="6" fill="none" stroke={strokeLight} strokeWidth="0.5" />
+        <rect x="30" y="24" width="8" height="10" fill="none" stroke={strokeLight} strokeWidth="0.5" />
+        <line x1="14" y1="28" x2="42" y2="28" stroke={strokeLight} strokeWidth="0.5" />
+      </>
+    ),
+    2: (
+      <>
+        <rect x="13" y="17" width="30" height="22" fill="none" stroke={stroke} strokeWidth="0.75" />
+        <rect x="13" y="17" width="12" height="22" fill={fill} opacity="0.35" stroke={strokeLight} strokeWidth="0.5" />
+        <rect x="31" y="20" width="12" height="8" fill="none" stroke={strokeLight} strokeWidth="0.5" />
+        <rect x="31" y="30" width="12" height="6" fill="none" stroke={strokeLight} strokeWidth="0.5" />
+      </>
+    ),
+    3: (
+      <>
+        <polygon points="18,36 28,18 38,36" fill="none" stroke={stroke} strokeWidth="0.75" />
+        <rect x="22" y="24" width="12" height="10" fill="none" stroke={strokeLight} strokeWidth="0.5" />
+        <line x1="18" y1="36" x2="38" y2="36" stroke={strokeLight} strokeWidth="0.5" />
+      </>
+    ),
+    4: (
+      <>
+        <rect x="16" y="19" width="24" height="18" fill="none" stroke={stroke} strokeWidth="0.75" />
+        <rect x="16" y="19" width="24" height="6" fill={fill} opacity="0.35" stroke={strokeLight} strokeWidth="0.5" />
+        <rect x="20" y="29" width="6" height="6" fill="none" stroke={strokeLight} strokeWidth="0.5" />
+        <rect x="30" y="29" width="6" height="6" fill="none" stroke={strokeLight} strokeWidth="0.5" />
+      </>
+    ),
+    5: (
+      <>
+        <rect x="12" y="20" width="32" height="16" fill="none" stroke={stroke} strokeWidth="0.75" />
+        <line x1="12" y1="24" x2="44" y2="24" stroke={strokeLight} strokeWidth="0.5" strokeDasharray="2 2" />
+        <line x1="12" y1="28" x2="44" y2="28" stroke={strokeLight} strokeWidth="0.5" strokeDasharray="2 2" />
+        <line x1="12" y1="32" x2="44" y2="32" stroke={strokeLight} strokeWidth="0.5" strokeDasharray="2 2" />
+      </>
+    ),
+  };
+
+  return (
+    <WireBox
+      title={`PDF page ${layoutIndex}`}
+      style={{
+        width: 56,
+        height: 72,
+        padding: 0,
+        overflow: "hidden",
+        flexShrink: 0,
+        borderRadius: 4,
+        border: selected ? `2px solid ${theme.accent.primary}` : undefined,
+      }}
+    >
+      <svg width="56" height="72" aria-label={`PDF page ${layoutIndex} preview`}>
+        <rect width="56" height="72" fill={theme.fill.quaternary} />
+        <rect x="5" y="6" width="46" height="60" fill={theme.bg.editor} stroke={theme.stroke.tertiary} strokeWidth="0.5" />
+        {floorplanByPage[layoutIndex] ?? floorplanByPage[1]}
+      </svg>
+    </WireBox>
+  );
+}
+
 function AssignmentSelectField({
   fieldKey,
   openField,
@@ -2180,12 +2445,58 @@ function AssignmentSelectField({
   );
 }
 
+function BuildingSetupPrompt({
+  building,
+  onDismiss,
+  onSetupGroundFloor,
+}: {
+  building: MockMapBuilding;
+  onDismiss: () => void;
+  onSetupGroundFloor: () => void;
+}) {
+  return (
+    <WireBox
+      style={{
+        position: "absolute",
+        top: "50%",
+        left: "50%",
+        transform: "translate(-50%, -50%)",
+        width: 320,
+        maxWidth: "90%",
+        zIndex: 25,
+        padding: 16,
+      }}
+    >
+      <Stack gap={10}>
+        <Stack gap={4}>
+          <Text weight="semibold">{building.label}</Text>
+          <Text size="small" tone="secondary">
+            Setup is not complete. Align the ground floor layout before placing devices on this building.
+          </Text>
+          <Text size="small" tone="tertiary" style={{ fontSize: 10 }}>
+            Ground floor: {building.groundFloorLabel}
+          </Text>
+        </Stack>
+        <Row gap={8} wrap>
+          <Button variant="primary" onClick={onSetupGroundFloor}>
+            Set up Ground floor
+          </Button>
+          <Button variant="ghost" onClick={onDismiss}>
+            Not now
+          </Button>
+        </Row>
+      </Stack>
+    </WireBox>
+  );
+}
+
 function LayoutAssignmentTable({
   assignments,
   activeLayoutIndex,
   onSelectLayout,
   onUpdateAssignment,
   onAlignLayout,
+  onConfirmOrganization,
 }: {
   assignments: PdfLayoutAssignment[];
   activeLayoutIndex: number;
@@ -2200,6 +2511,7 @@ function LayoutAssignmentTable({
     >,
   ) => void;
   onAlignLayout: (layoutIndex: number) => void;
+  onConfirmOrganization: () => void;
 }) {
   const theme = useHostTheme();
   const [openField, setOpenField] = useState<string | null>(null);
@@ -2220,21 +2532,23 @@ function LayoutAssignmentTable({
     })),
   ].filter((option, index, all) => all.findIndex((o) => o.label === option.label) === index);
 
+  const allRowsComplete = assignments.length > 0 && assignments.every(isLayoutRowComplete);
+
   return (
     <Stack gap={10} style={{ padding: "8px 0 4px", width: "100%", textAlign: "left" }}>
       <Callout tone="info" title="Layouts read from PDF">
         <Text size="small" tone="secondary">
-          We read sheet titles and metadata from your upload. Match each layout to an address, floor, and building in
+          We detected floor layouts across your PDF pages. Match each layout to an address, floor, and building in
           Verkada — then align on the map.
         </Text>
       </Callout>
 
       <WireBox style={{ padding: 0, overflow: "visible" }}>
-        <div style={{ overflowX: "auto" }}>
+        <div style={{ overflowX: "auto", overflowY: "visible" }}>
           <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 11 }}>
             <thead>
               <tr style={{ background: theme.fill.quaternary }}>
-                {["Layout", "Address", "Floor", "Building"].map((header) => (
+                {["Page", "Address", "Floor", "Building"].map((header) => (
                   <th
                     key={header}
                     style={{
@@ -2294,15 +2608,8 @@ function LayoutAssignmentTable({
                       verticalAlign: "top",
                     }}
                   >
-                    <td style={{ padding: "8px 10px", borderBottom: `1px solid ${theme.stroke.tertiary}`, minWidth: 120 }}>
-                      <Stack gap={2}>
-                        <Text size="small" weight="semibold">
-                          Sheet {row.layoutIndex}
-                        </Text>
-                        <Text size="small" tone="tertiary" style={{ fontSize: 10 }}>
-                          {row.pdfLabel}
-                        </Text>
-                      </Stack>
+                    <td style={{ padding: "8px 10px", borderBottom: `1px solid ${theme.stroke.tertiary}`, width: 72 }}>
+                      <LayoutPagePreview layoutIndex={row.layoutIndex} selected={selected} />
                     </td>
                     <td style={{ padding: "8px 10px", borderBottom: `1px solid ${theme.stroke.tertiary}`, minWidth: 210 }}>
                       <AssignmentSelectField
@@ -2470,6 +2777,17 @@ function LayoutAssignmentTable({
           </table>
         </div>
       </WireBox>
+
+      <Row justify="space-between" align="center" wrap style={{ paddingTop: 4 }}>
+        <Text size="small" tone="tertiary" style={{ fontSize: 10 }}>
+          {allRowsComplete
+            ? "Ready to add these locations, buildings, and floors to Verkada."
+            : "Complete every row before confirming."}
+        </Text>
+        <Button variant="primary" disabled={!allRowsComplete} onClick={onConfirmOrganization} style={{ fontSize: 11 }}>
+          Looks good to me
+        </Button>
+      </Row>
     </Stack>
   );
 }
@@ -2482,6 +2800,7 @@ function UploadedFileTile({
   onUpdateAssignment,
   onRemove,
   onAlignLayout,
+  onConfirmOrganization,
 }: {
   file: MockUploadedFile;
   layoutAssignments: PdfLayoutAssignment[];
@@ -2498,6 +2817,7 @@ function UploadedFileTile({
   ) => void;
   onRemove: () => void;
   onAlignLayout: (layoutIndex: number) => void;
+  onConfirmOrganization: () => void;
 }) {
   const theme = useHostTheme();
   const hasLocation = !!file.locationAddress;
@@ -2523,12 +2843,15 @@ function UploadedFileTile({
           </Text>
           {multiLayout ? (
             <Text size="small" tone="tertiary" style={{ fontSize: 10 }}>
-              {layoutCount} layouts detected · fields read from PDF
+              {formatLayoutPageSummary(file)} · fields read from PDF
             </Text>
           ) : null}
         </Stack>
         {multiLayout ? (
-          <Chip label={`${layoutCount} layouts`} tone="accent" />
+          <Chip
+            label={file.pageCount ? `${layoutCount} of ${file.pageCount} pages` : `${layoutCount} layouts`}
+            tone="accent"
+          />
         ) : hasLocation ? (
           <Chip label={file.locationAddress!.split(",")[0]} tone="success" />
         ) : (
@@ -2563,6 +2886,7 @@ function UploadedFileTile({
             onSelectLayout={onSelectLayout}
             onUpdateAssignment={onUpdateAssignment}
             onAlignLayout={onAlignLayout}
+            onConfirmOrganization={onConfirmOrganization}
           />
         </div>
       ) : null}
@@ -2579,6 +2903,7 @@ function FirstVisitUploadCard({
   onUploadFile,
   onRemoveFile,
   onAlignLayout,
+  onConfirmOrganization,
 }: {
   uploadedFiles: MockUploadedFile[];
   layoutAssignments: PdfLayoutAssignment[];
@@ -2596,6 +2921,7 @@ function FirstVisitUploadCard({
   onUploadFile: () => void;
   onRemoveFile: (id: string) => void;
   onAlignLayout: (layoutIndex: number) => void;
+  onConfirmOrganization: () => void;
 }) {
   const theme = useHostTheme();
   const [dropHover, setDropHover] = useState(false);
@@ -2605,13 +2931,12 @@ function FirstVisitUploadCard({
   return (
     <Card
       style={{
-        position: "absolute",
-        top: "50%",
-        left: "50%",
-        transform: "translate(-50%, -50%)",
+        position: "relative",
+        margin: "0 auto",
         width: hasMultiLayout ? 760 : 480,
         maxWidth: "96%",
         zIndex: 15,
+        flexShrink: 0,
       }}
     >
       <CardBody style={{ padding: 24 }}>
@@ -2629,7 +2954,7 @@ function FirstVisitUploadCard({
             <Text size="small" tone="tertiary" style={{ fontSize: 10, textTransform: "uppercase", letterSpacing: "0.04em" }}>
               Add your files
             </Text>
-            <WireBox style={{ padding: 0, overflow: "hidden" }}>
+            <WireBox style={{ padding: 0, overflow: "visible" }}>
               <div
                 role="button"
                 tabIndex={0}
@@ -2686,6 +3011,7 @@ function FirstVisitUploadCard({
                       onUpdateAssignment={onUpdateAssignment}
                       onRemove={() => onRemoveFile(file.id)}
                       onAlignLayout={onAlignLayout}
+                      onConfirmOrganization={onConfirmOrganization}
                     />
                   ))}
                 </div>
@@ -2939,11 +3265,13 @@ const LOCATION_FLOW_STEPS: Record<
 function LocationFlowSidePanel({
   step,
   onBack,
+  panelLeft,
   children,
 }: {
   step: LocationFlowStep;
   fileName: string;
   onBack?: () => void;
+  panelLeft: number;
   children: React.ReactNode;
 }) {
   const theme = useHostTheme();
@@ -2954,7 +3282,7 @@ function LocationFlowSidePanel({
       style={{
         position: "absolute",
         top: 12,
-        left: 12,
+        left: panelLeft,
         width: 300,
         maxHeight: "calc(100% - 24px)",
         zIndex: 20,
@@ -3447,6 +3775,7 @@ function PrototypeFrame({
   const switchRail = (id: RailId) => {
     setState({
       rail: id,
+      leftPanelCollapsed: false,
       selectedPlaceId: null,
       editorMode: false,
       editorEntry: "none",
@@ -3470,10 +3799,15 @@ function PrototypeFrame({
 
   const isFirstVisitFlow = !state.orgHasFloorplans && !state.editorMode && state.editorEntry !== "manage-home";
   const isFirstVisitUpload = isFirstVisitFlow && (state.uploadStage === "idle" || state.uploadStage === "confirmed");
+  const isSetupAlign = Boolean(state.setupAlignBuildingId && state.uploadStage === "aligning");
   const isLocatingFloorplan = isFirstVisitFlow && state.uploadStage === "locating";
-  const isAligningFloorplan = isFirstVisitFlow && state.uploadStage === "aligning";
+  const isAligningFloorplan = (isFirstVisitFlow && state.uploadStage === "aligning") || isSetupAlign;
   const isSelectingSites = isFirstVisitFlow && state.uploadStage === "select-sites";
-  const isLocationFlowMap = isLocatingFloorplan || isAligningFloorplan || isSelectingSites;
+  const isLocationFlowMap = isLocatingFloorplan || isAligningFloorplan || isSelectingSites || isSetupAlign;
+  const hasCommittedMap = (state.mapBuildings ?? []).length > 0;
+  const leftPanelCollapsed = state.leftPanelCollapsed ?? false;
+  const mapsLeftChromeWidth = getMapsLeftChromeWidth(leftPanelCollapsed);
+  const locationFlowPanelLeft = mapsLeftChromeWidth + 12;
 
   const uploadedFiles = state.uploadedFiles ?? [];
   const locatingFile = uploadedFiles.find((f) => f.id === state.locatingFileId) ?? null;
@@ -3530,6 +3864,65 @@ function PrototypeFrame({
       selectedAddressId: null,
       locationPinX: 48,
       locationPinY: 52,
+      buildingSetupPromptId: null,
+    });
+  };
+
+  const confirmLayoutOrganization = () => {
+    const assignments = state.layoutAssignments ?? [];
+    if (!assignments.every(isLayoutRowComplete)) return;
+    setState({
+      orgHasFloorplans: true,
+      uploadStage: "idle",
+      committedLayoutLocations: buildLocationTreeFromAssignments(assignments),
+      mapBuildings: buildMapBuildingsFromAssignments(assignments),
+      rail: "map",
+      selectedPlaceId: null,
+      editorMode: false,
+      editorEntry: "none",
+      buildingSetupPromptId: null,
+      setupAlignBuildingId: null,
+      locatingFileId: MOCK_MULTI_LAYOUT_FILE.id,
+      uploadedFiles: [MOCK_MULTI_LAYOUT_FILE],
+    });
+  };
+
+  const startBuildingSetupAlign = (buildingId: string) => {
+    const building = (state.mapBuildings ?? []).find((b) => b.id === buildingId);
+    if (!building) return;
+    const assignment = (state.layoutAssignments ?? []).find((row) => row.layoutIndex === building.groundFloorLayoutIndex);
+    const suggestion = findAddressSuggestionForAddress(assignment?.address ?? building.address);
+    setState({
+      buildingSetupPromptId: null,
+      setupAlignBuildingId: buildingId,
+      uploadStage: "aligning",
+      activeLayoutIndex: building.groundFloorLayoutIndex,
+      locatingFileId: MOCK_MULTI_LAYOUT_FILE.id,
+      uploadedFiles: state.uploadedFiles.length > 0 ? state.uploadedFiles : [MOCK_MULTI_LAYOUT_FILE],
+      locationQuery: assignment?.address ?? building.address,
+      locationSearchFocused: false,
+      locationPinned: true,
+      selectedAddressId: suggestion?.id ?? null,
+      locationPinX: suggestion?.mapCenter.x ?? 50,
+      locationPinY: suggestion?.mapCenter.y ?? 52,
+      alignOpacity: 0.65,
+      alignScale: 1,
+      alignRotation: 0,
+      alignOffsetX: 0,
+      alignOffsetY: 0,
+      rail: "map",
+      selectedPlaceId: null,
+      editorMode: false,
+    });
+  };
+
+  const cancelSetupAlign = () => {
+    setState({
+      uploadStage: "idle",
+      setupAlignBuildingId: null,
+      locatingFileId: null,
+      locationPinned: false,
+      selectedAddressId: null,
     });
   };
 
@@ -3595,6 +3988,21 @@ function PrototypeFrame({
   };
 
   const confirmAlignment = () => {
+    if (state.setupAlignBuildingId) {
+      setState({
+        mapBuildings: (state.mapBuildings ?? []).map((building) =>
+          building.id === state.setupAlignBuildingId ? { ...building, setupComplete: true } : building,
+        ),
+        uploadStage: "idle",
+        setupAlignBuildingId: null,
+        locatingFileId: null,
+        locationPinned: false,
+        selectedAddressId: null,
+        rail: "map",
+        selectedPlaceId: null,
+      });
+      return;
+    }
     setState({
       uploadStage: "select-sites",
       alignOpacity: 1,
@@ -3661,7 +4069,7 @@ function PrototypeFrame({
 
   if (state.editorEntry === "manage-home") {
     return (
-      <WireBox style={{ position: "relative", height: 520, overflow: "hidden", background: theme.bg.editor }}>
+      <WireBox style={prototypeFrameShellStyle(theme)}>
         <WireBox
           style={{
             position: "absolute",
@@ -3708,7 +4116,7 @@ function PrototypeFrame({
   const rightPanelWidth = state.editorMode ? 240 : 0;
 
   return (
-    <WireBox style={{ position: "relative", height: 520, overflow: "hidden", background: theme.bg.editor }}>
+    <WireBox style={prototypeFrameShellStyle(theme)}>
       {/* Command band */}
       <WireBox
         style={{
@@ -3744,7 +4152,7 @@ function PrototypeFrame({
           style={{
             position: "absolute",
             top: 36,
-            left: 40,
+            left: MAPS_RAIL_WIDTH,
             right: rightPanelWidth,
             height: 40,
             zIndex: 25,
@@ -3836,12 +4244,39 @@ function PrototypeFrame({
               ? theme.bg.editor
               : theme.fill.quaternary,
           cursor: "default",
+          overflow: isFirstVisitUpload ? "auto" : "hidden",
         }}
         onClick={() => {
           if (state.searchFocused) setState({ searchFocused: false, searchQuery: "" });
+          if (state.buildingSetupPromptId) setState({ buildingSetupPromptId: null });
         }}
       >
-        {isFirstVisitUpload ? <GlobeBackdrop /> : null}
+        {isFirstVisitUpload ? (
+          <>
+            <GlobeBackdrop />
+            <div
+              style={{
+                position: "relative",
+                zIndex: 15,
+                padding: "20px 12px 28px",
+                minHeight: "100%",
+                boxSizing: "border-box",
+              }}
+            >
+              <FirstVisitUploadCard
+                uploadedFiles={uploadedFiles}
+                layoutAssignments={state.layoutAssignments ?? []}
+                activeLayoutIndex={state.activeLayoutIndex ?? 1}
+                onSelectLayout={(index) => setState({ activeLayoutIndex: index })}
+                onUpdateAssignment={updateLayoutAssignment}
+                onUploadFile={simulateFileUpload}
+                onRemoveFile={removeUploadedFile}
+                onAlignLayout={beginLocationForLayout}
+                onConfirmOrganization={confirmLayoutOrganization}
+              />
+            </div>
+          </>
+        ) : null}
 
         {isLocationFlowMap ? (
           state.locationPinned || isAligningFloorplan || isSelectingSites ? (
@@ -3852,14 +4287,14 @@ function PrototypeFrame({
         ) : null}
 
         {!isFirstVisitUpload && !isLocationFlowMap ? (
-        <svg width="100%" height="100%" style={{ position: "absolute", inset: 0, opacity: state.orgHasFloorplans ? 0.35 : 0.2 }}>
+        <svg width="100%" height="100%" style={{ position: "absolute", inset: 0, opacity: hasCommittedMap || state.orgHasFloorplans ? 0.35 : 0.2 }}>
           <defs>
             <pattern id="grid" width="32" height="32" patternUnits="userSpaceOnUse">
               <path d="M 32 0 L 0 0 0 32" fill="none" stroke={theme.stroke.tertiary} strokeWidth="0.5" />
             </pattern>
           </defs>
           <rect width="100%" height="100%" fill="url(#grid)" />
-          {state.orgHasFloorplans ? (
+          {hasCommittedMap ? null : state.orgHasFloorplans ? (
             <>
               <rect x="18%" y="22%" width="52%" height="48%" fill="none" stroke={theme.stroke.secondary} strokeWidth="1.5" />
               <rect x="28%" y="32%" width="18%" height="14%" fill="none" stroke={theme.stroke.secondary} strokeWidth="1" />
@@ -3876,7 +4311,49 @@ function PrototypeFrame({
         </svg>
         ) : null}
 
-        {state.orgHasFloorplans ? <EditorCanvasOverlays state={state} /> : null}
+        {hasCommittedMap && !isLocationFlowMap && !isFirstVisitUpload
+          ? (state.mapBuildings ?? []).map((building) => (
+              <button
+                key={building.id}
+                type="button"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  if (!building.setupComplete) setState({ buildingSetupPromptId: building.id, selectedPlaceId: null });
+                }}
+                style={{
+                  position: "absolute",
+                  left: `${building.x}%`,
+                  top: `${building.y}%`,
+                  width: `${building.width}%`,
+                  height: `${building.height}%`,
+                  border: `2px ${building.setupComplete ? "solid" : "dashed"} ${building.setupComplete ? theme.stroke.secondary : theme.accent.primary}`,
+                  borderRadius: 6,
+                  background: building.setupComplete ? theme.fill.quaternary : theme.fill.tertiary,
+                  cursor: building.setupComplete ? "default" : "pointer",
+                  padding: 8,
+                  textAlign: "left",
+                  zIndex: 12,
+                }}
+              >
+                <Stack gap={4} style={{ alignItems: "flex-start" }}>
+                  <Text size="small" weight="semibold">
+                    {building.label}
+                  </Text>
+                  {!building.setupComplete ? <Chip label="Setup needed" tone="accent" /> : null}
+                </Stack>
+              </button>
+            ))
+          : null}
+
+        {state.buildingSetupPromptId && (state.mapBuildings ?? []).find((b) => b.id === state.buildingSetupPromptId) ? (
+          <BuildingSetupPrompt
+            building={(state.mapBuildings ?? []).find((b) => b.id === state.buildingSetupPromptId)!}
+            onDismiss={() => setState({ buildingSetupPromptId: null })}
+            onSetupGroundFloor={() => startBuildingSetupAlign(state.buildingSetupPromptId!)}
+          />
+        ) : null}
+
+        {state.orgHasFloorplans && !hasCommittedMap ? <EditorCanvasOverlays state={state} /> : null}
 
         {showDropHint ? (
           <WireBox
@@ -3900,19 +4377,6 @@ function PrototypeFrame({
           </WireBox>
         ) : null}
 
-        {isFirstVisitUpload ? (
-          <FirstVisitUploadCard
-            uploadedFiles={uploadedFiles}
-            layoutAssignments={state.layoutAssignments ?? []}
-            activeLayoutIndex={state.activeLayoutIndex ?? 1}
-            onSelectLayout={(index) => setState({ activeLayoutIndex: index })}
-            onUpdateAssignment={updateLayoutAssignment}
-            onUploadFile={simulateFileUpload}
-            onRemoveFile={removeUploadedFile}
-            onAlignLayout={beginLocationForLayout}
-          />
-        ) : null}
-
         {isLocatingFloorplan && locatingFile ? (
           <LocationFlowSidePanel
             step="search"
@@ -3928,6 +4392,7 @@ function PrototypeFrame({
               return `${base} · ${assignment.building} · ${assignment.floorLevel}`;
             })()}
             onBack={cancelLocationSetup}
+            panelLeft={locationFlowPanelLeft}
           >
             <LocationSearchStepContent
               query={state.locationQuery}
@@ -3960,7 +4425,18 @@ function PrototypeFrame({
               offsetX={state.alignOffsetX ?? 0}
               offsetY={state.alignOffsetY ?? 0}
             />
-            <LocationFlowSidePanel step="align" fileName={locatingFile?.fileName ?? "Floorplan"}>
+            <LocationFlowSidePanel
+              step="align"
+              fileName={(() => {
+                if (isSetupAlign) {
+                  const building = (state.mapBuildings ?? []).find((b) => b.id === state.setupAlignBuildingId);
+                  return `${building?.label ?? "Building"} · ${building?.groundFloorLabel ?? "Ground floor"}`;
+                }
+                return locatingFile?.fileName ?? "Floorplan";
+              })()}
+              onBack={isSetupAlign ? cancelSetupAlign : undefined}
+              panelLeft={locationFlowPanelLeft}
+            >
               <AlignmentStepContent
                 fileName={locatingFile?.fileName ?? "Floorplan"}
                 opacity={state.alignOpacity ?? 0.65}
@@ -3987,6 +4463,7 @@ function PrototypeFrame({
               step="select-sites"
               fileName={locatingFile?.fileName ?? "Floorplan"}
               onBack={backFromSiteSelection}
+              panelLeft={locationFlowPanelLeft}
             >
               <SiteSelectionStepContent
                 query={state.siteSearchQuery ?? ""}
@@ -3999,7 +4476,7 @@ function PrototypeFrame({
           </>
         ) : null}
 
-        {state.orgHasFloorplans
+        {state.orgHasFloorplans && !hasCommittedMap
           ? MARKERS.map((marker) => {
           const selected = state.selectedMarkerId === marker.id;
           return (
@@ -4044,9 +4521,11 @@ function PrototypeFrame({
         >
           {!state.orgHasFloorplans
             ? "Basemap · no floorplan"
-            : selectedPlace?.kind === "floor"
-              ? `${selectedPlace.label} · Main Bldg`
-              : "Floor 3 · Main Bldg"}
+            : hasCommittedMap
+              ? "HQ Campus · new buildings on map"
+              : selectedPlace?.kind === "floor"
+                ? `${selectedPlace.label} · Main Bldg`
+                : "Floor 3 · Main Bldg"}
         </Text>
         ) : null}
 
@@ -4185,8 +4664,7 @@ function PrototypeFrame({
         ) : null}
       </div>
 
-      {/* Left rail + panel — hidden on first visit landing */}
-      {!isFirstVisitFlow ? (
+      {/* Left rail + panel — persistent across first visit onboarding */}
       <>
       <WireBox
         style={{
@@ -4194,7 +4672,7 @@ function PrototypeFrame({
           top: 36,
           left: 0,
           bottom: 0,
-          width: 40,
+          width: MAPS_RAIL_WIDTH,
           borderRadius: 0,
           borderTop: "none",
           borderBottom: "none",
@@ -4207,9 +4685,26 @@ function PrototypeFrame({
           zIndex: 20,
         }}
       >
-        <Button variant="ghost" style={{ fontSize: 10, padding: "2px 4px" }} onClick={() => setState({ filesFlyoutOpen: !state.filesFlyoutOpen })}>
+        <Button
+          variant="ghost"
+          style={{ fontSize: 10, padding: "2px 4px" }}
+          onClick={() => {
+            if (isFirstVisitFlow) return;
+            setState({ filesFlyoutOpen: !state.filesFlyoutOpen });
+          }}
+        >
           Menu
         </Button>
+        {leftPanelCollapsed ? (
+          <Button
+            variant="ghost"
+            title="Show panel"
+            onClick={() => setState({ leftPanelCollapsed: false })}
+            style={{ fontSize: 10, padding: "2px 4px", minWidth: 0 }}
+          >
+            »
+          </Button>
+        ) : null}
         {RAIL_ITEMS.map((item) => {
           const active =
             state.rail === item.id &&
@@ -4240,13 +4735,14 @@ function PrototypeFrame({
       </WireBox>
 
       {/* Left panel */}
+      {!leftPanelCollapsed ? (
       <WireBox
         style={{
           position: "absolute",
           top: state.editorMode ? 76 : 36,
-          left: 40,
+          left: MAPS_RAIL_WIDTH,
           bottom: 0,
-          width: 220,
+          width: MAPS_LEFT_PANEL_WIDTH,
           borderRadius: 0,
           borderTop: "none",
           borderBottom: "none",
@@ -4259,7 +4755,7 @@ function PrototypeFrame({
       >
         <div style={{ padding: 8, borderBottom: `1px solid ${theme.stroke.tertiary}` }}>
           {!state.editorMode && state.searchFocused ? (
-            <Row gap={6}>
+            <Row gap={6} align="center">
               <TextInput
                 value={state.searchQuery}
                 onChange={(value) => setState({ searchQuery: value })}
@@ -4270,27 +4766,55 @@ function PrototypeFrame({
               <Button variant="ghost" onClick={() => setState({ searchFocused: false, searchQuery: "" })}>
                 x
               </Button>
+              <Button
+                variant="ghost"
+                title="Hide panel"
+                onClick={() => setState({ leftPanelCollapsed: true, searchFocused: false, searchQuery: "" })}
+                style={{ fontSize: 10, padding: "2px 6px", flexShrink: 0 }}
+              >
+                ◀
+              </Button>
             </Row>
           ) : !state.editorMode ? (
-            <Button
-              variant="secondary"
-              onClick={() => setState({ searchFocused: true })}
-              style={{ width: "100%", justifyContent: "flex-start", fontSize: 11 }}
-            >
-              Search Verkada Maps…
-            </Button>
+            <Row gap={6} align="center">
+              <Button
+                variant="secondary"
+                onClick={() => setState({ searchFocused: true })}
+                style={{ flex: 1, minWidth: 0, justifyContent: "flex-start", fontSize: 11 }}
+              >
+                Search Verkada Maps…
+              </Button>
+              <Button
+                variant="ghost"
+                title="Hide panel"
+                onClick={() => setState({ leftPanelCollapsed: true })}
+                style={{ fontSize: 10, padding: "2px 6px", flexShrink: 0 }}
+              >
+                ◀
+              </Button>
+            </Row>
           ) : (
-            <Text size="small" tone="tertiary" style={{ padding: "4px 0" }}>
-              Floor context
-            </Text>
+            <Row gap={6} align="center" justify="space-between">
+              <Text size="small" tone="tertiary" style={{ padding: "4px 0" }}>
+                Floor context
+              </Text>
+              <Button
+                variant="ghost"
+                title="Hide panel"
+                onClick={() => setState({ leftPanelCollapsed: true })}
+                style={{ fontSize: 10, padding: "2px 6px", flexShrink: 0 }}
+              >
+                ◀
+              </Button>
+            </Row>
           )}
         </div>
         <div style={{ flex: 1, minHeight: 0 }}>
           <LeftPanelContent state={state} setState={setState} />
         </div>
       </WireBox>
-      </>
       ) : null}
+      </>
 
       {/* Editor right panel */}
       {state.editorMode ? (
@@ -4314,13 +4838,13 @@ function PrototypeFrame({
         </WireBox>
       ) : null}
 
-      {/* Files flyout — not shown on first visit landing (drop zone is inline) */}
+      {/* Files flyout — hidden during first visit onboarding */}
       {state.filesFlyoutOpen && !isFirstVisitFlow ? (
         <WireBox
           style={{
             position: "absolute",
             top: 72,
-            left: 48,
+            left: MAPS_RAIL_WIDTH + 8,
             width: 200,
             zIndex: 40,
             padding: 10,
@@ -4394,6 +4918,7 @@ export function EditorPrototype() {
     collTab: "mine",
     sitePickerOpen: false,
     filesFlyoutOpen: false,
+    leftPanelCollapsed: false,
     layersClusterOpen: false,
     orgHasFloorplans: false,
     uploadStage: "idle",
@@ -4414,6 +4939,10 @@ export function EditorPrototype() {
     selectedSiteIds: [],
     activeLayoutIndex: 1,
     layoutAssignments: [],
+    committedLayoutLocations: [],
+    mapBuildings: [],
+    buildingSetupPromptId: null,
+    setupAlignBuildingId: null,
   });
   const [activePreset, setActivePreset] = useCanvasState<string>("maps2-nav-preset", "first-visit");
   const [activeUseCase, setActiveUseCase] = useCanvasState<PrototypeUseCase>("maps2-use-case", "first-visit");
@@ -4464,8 +4993,16 @@ export function EditorPrototype() {
   };
 
   return (
-    <Stack gap={12}>
-      <Row gap={6} wrap align="center">
+    <Stack
+      gap={12}
+      style={{
+        height: "100%",
+        minHeight: "100dvh",
+        boxSizing: "border-box",
+        overflow: "auto",
+      }}
+    >
+      <Row gap={6} wrap align="center" style={{ flexShrink: 0 }}>
         <Text size="small" tone="tertiary" style={{ fontSize: 10, textTransform: "uppercase" }}>
           Use case
         </Text>
@@ -4484,8 +5021,8 @@ export function EditorPrototype() {
         </Pill>
       </Row>
 
-      <Grid columns="220px 1fr" gap={16} align="start">
-        <Stack gap={8}>
+      <Grid columns="220px 1fr" gap={16} align="stretch" style={{ flex: 1, minHeight: 0 }}>
+        <Stack gap={8} style={{ overflow: "auto", minHeight: 0 }}>
           <H3>{activeUseCase === "add-files" ? "Add files" : workspaceFocus === "editor" ? "Onboarding" : "All states"}</H3>
           <Stack gap={4}>
             {visiblePresets.map((preset) => (
@@ -4502,8 +5039,8 @@ export function EditorPrototype() {
           </Stack>
         </Stack>
 
-        <Stack gap={12}>
-          <Row gap={8} align="center" wrap>
+        <Stack gap={12} style={{ flex: 1, minHeight: 0, minWidth: 0, height: "100%" }}>
+          <Row gap={8} align="center" wrap style={{ flexShrink: 0 }}>
             <Text size="small" tone="secondary">
               State:
             </Text>
@@ -4514,16 +5051,28 @@ export function EditorPrototype() {
               1 file, 1 layout uploaded
             </Button>
             <Button variant="ghost" onClick={() => jumpToPreset("upload-multi-layout")}>
-              1 file, 5 layouts in file uploaded
+              1 file, 5 layouts of 23 pages uploaded
             </Button>
             <Button variant="ghost" onClick={() => jumpToPreset("editor-idle")}>
               Jump to editor idle
             </Button>
           </Row>
 
-          <PrototypeFrame state={state} setState={setState} showDropHint={showDropHint} />
+          <div
+            style={{
+              flex: 1,
+              minHeight: PROTOTYPE_FRAME_MIN_HEIGHT,
+              height: PROTOTYPE_FRAME_HEIGHT,
+              display: "flex",
+              flexDirection: "column",
+            }}
+          >
+            <PrototypeFrame state={state} setState={setState} showDropHint={showDropHint} />
+          </div>
 
-          <PresetContextBar label={currentPreset.label} description={currentPreset.description} />
+          <div style={{ flexShrink: 0 }}>
+            <PresetContextBar label={currentPreset.label} description={currentPreset.description} />
+          </div>
         </Stack>
       </Grid>
     </Stack>
