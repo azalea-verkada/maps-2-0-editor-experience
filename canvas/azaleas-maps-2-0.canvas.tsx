@@ -1,4 +1,4 @@
-import { useCallback, useState } from "react";
+import { useCallback, useState, type MouseEvent, type ReactNode } from "react";
 import {
   Button,
   Callout,
@@ -6,10 +6,7 @@ import {
   CardBody,
   Divider,
   Grid,
-  H1,
-  H2,
   H3,
-  Link,
   Pill,
   Row,
   Spacer,
@@ -31,6 +28,7 @@ type EditorTool = "Select" | "Wall" | "Door" | "Window" | "Camera" | "Sensor" | 
 type EditorEntry = "none" | "manage-home" | "in-context";
 type EditorRightTab = "tools" | "devices" | "properties";
 type WorkspaceFocus = "editor" | "full";
+type PrototypeUseCase = "first-visit" | "add-files";
 type CollTab = "mine" | "shared" | "following";
 type UploadFlowStage = "idle" | "confirmed" | "locating" | "aligning" | "select-sites";
 
@@ -58,6 +56,34 @@ type MockUploadedFile = {
   id: string;
   fileName: string;
   locationAddress: string | null;
+  /** When a single file contains multiple floor layouts (e.g. multi-page PDF). */
+  layoutCount?: number;
+};
+
+type PdfFieldSource = "pdf-title" | "pdf-metadata" | "inferred";
+
+type PdfLayoutAssignment = {
+  layoutIndex: number;
+  pdfLabel: string;
+  extractedAddress: string;
+  address: string;
+  floorLevel: string;
+  building: string;
+  buildingMatchId: string | null;
+  useCustomBuilding: boolean;
+  useCustomFloor: boolean;
+  fieldSources: {
+    address: PdfFieldSource;
+    floorLevel: PdfFieldSource;
+    building: PdfFieldSource;
+  };
+};
+
+type OrgBuilding = {
+  id: string;
+  name: string;
+  address: string;
+  floors: string[];
 };
 
 type VerkadaAddressSource = "Site" | "Camera" | "Alarms area" | "Access door";
@@ -114,6 +140,10 @@ type AppState = {
   /** Step 3 — link floorplan to existing Command sites. */
   siteSearchQuery: string;
   selectedSiteIds: string[];
+  /** Active layout sheet when a file contains multiple layouts (1-based). */
+  activeLayoutIndex: number;
+  /** Per-layout fields read from PDF + user edits (multi-layout upload). */
+  layoutAssignments: PdfLayoutAssignment[];
 };
 
 type MockOrgSite = {
@@ -168,6 +198,8 @@ function getFirstVisitDefault(): AppState {
     alignOffsetY: 0,
     siteSearchQuery: "",
     selectedSiteIds: [],
+    activeLayoutIndex: 1,
+    layoutAssignments: [],
   };
 }
 
@@ -210,6 +242,8 @@ function getEditorDefault(): AppState {
     alignOffsetY: 0,
     siteSearchQuery: "",
     selectedSiteIds: [],
+    activeLayoutIndex: 1,
+    layoutAssignments: [],
   };
 }
 
@@ -310,7 +344,129 @@ const MOCK_UPLOAD_FILE_ROW: MockUploadedFile = {
   id: "file-1",
   fileName: MOCK_UPLOAD_FILE,
   locationAddress: null,
+  layoutCount: 1,
 };
+
+const MOCK_MULTI_LAYOUT_FILE: MockUploadedFile = {
+  id: "file-multi",
+  fileName: "HQ-All-Floors.pdf",
+  locationAddress: null,
+  layoutCount: 5,
+};
+
+const ORG_BUILDINGS: OrgBuilding[] = [
+  {
+    id: "b-main",
+    name: "Main Building",
+    address: "500 Howard St, San Francisco, CA",
+    floors: ["Level 1", "Level 2", "Level 3"],
+  },
+  {
+    id: "b-east",
+    name: "East Wing",
+    address: "502 Howard St, San Francisco, CA",
+    floors: ["Level 1"],
+  },
+];
+
+function findOrgBuildingByName(name: string): OrgBuilding | undefined {
+  const q = name.trim().toLowerCase();
+  return ORG_BUILDINGS.find((b) => b.name.toLowerCase() === q);
+}
+
+function findOrgBuildingById(id: string | null): OrgBuilding | undefined {
+  if (!id) return undefined;
+  return ORG_BUILDINGS.find((b) => b.id === id);
+}
+
+function isLayoutRowComplete(row: PdfLayoutAssignment): boolean {
+  return Boolean(row.address.trim() && row.floorLevel.trim() && row.building.trim());
+}
+
+const MOCK_PDF_LAYOUT_ASSIGNMENTS: PdfLayoutAssignment[] = [
+  {
+    layoutIndex: 1,
+    pdfLabel: "A-101 · Level 1 Lobby",
+    extractedAddress: "500 Howard St, San Francisco, CA",
+    address: "500 Howard St, San Francisco, CA",
+    floorLevel: "Level 1",
+    building: "Main Building",
+    buildingMatchId: "b-main",
+    useCustomBuilding: false,
+    useCustomFloor: false,
+    fieldSources: { address: "pdf-metadata", floorLevel: "pdf-title", building: "inferred" },
+  },
+  {
+    layoutIndex: 2,
+    pdfLabel: "A-102 · Level 2 Office",
+    extractedAddress: "500 Howard St, San Francisco, CA",
+    address: "500 Howard St, San Francisco, CA",
+    floorLevel: "Level 2",
+    building: "Main Building",
+    buildingMatchId: "b-main",
+    useCustomBuilding: false,
+    useCustomFloor: false,
+    fieldSources: { address: "pdf-metadata", floorLevel: "pdf-title", building: "inferred" },
+  },
+  {
+    layoutIndex: 3,
+    pdfLabel: "A-103 · Level 3 Executive",
+    extractedAddress: "500 Howard St, San Francisco, CA",
+    address: "500 Howard St, San Francisco, CA",
+    floorLevel: "Level 3",
+    building: "Main Building",
+    buildingMatchId: "b-main",
+    useCustomBuilding: false,
+    useCustomFloor: false,
+    fieldSources: { address: "pdf-metadata", floorLevel: "pdf-title", building: "inferred" },
+  },
+  {
+    layoutIndex: 4,
+    pdfLabel: "B-001 · East Wing L1",
+    extractedAddress: "502 Howard St, San Francisco, CA",
+    address: "502 Howard St, San Francisco, CA",
+    floorLevel: "Level 1",
+    building: "East Wing",
+    buildingMatchId: "b-east",
+    useCustomBuilding: false,
+    useCustomFloor: false,
+    fieldSources: { address: "pdf-title", floorLevel: "pdf-title", building: "pdf-title" },
+  },
+  {
+    layoutIndex: 5,
+    pdfLabel: "P-1 · Parking Level P1",
+    extractedAddress: "500 Howard St, San Francisco, CA",
+    address: "500 Howard St, San Francisco, CA",
+    floorLevel: "Level P1",
+    building: "Parking Structure",
+    buildingMatchId: null,
+    useCustomBuilding: true,
+    useCustomFloor: true,
+    fieldSources: { address: "pdf-metadata", floorLevel: "pdf-title", building: "inferred" },
+  },
+];
+
+function fieldSourceHint(source: PdfFieldSource): string {
+  if (source === "pdf-title") return "Read from sheet title";
+  if (source === "pdf-metadata") return "Read from PDF metadata";
+  return "Suggested from org sites";
+}
+
+function cloneLayoutAssignments(assignments: PdfLayoutAssignment[]): PdfLayoutAssignment[] {
+  return assignments.map((row) => ({
+    ...row,
+    fieldSources: { ...row.fieldSources },
+  }));
+}
+
+function getFloorsForAssignment(row: PdfLayoutAssignment): string[] {
+  const orgBuilding = findOrgBuildingById(row.buildingMatchId) ?? findOrgBuildingByName(row.building);
+  const floors = orgBuilding ? [...orgBuilding.floors] : [];
+  if (row.floorLevel && !floors.includes(row.floorLevel)) {
+    floors.unshift(row.floorLevel);
+  }
+  return floors;
+}
 
 const VERKADA_ADDRESS_SUGGESTIONS: VerkadaAddressSuggestion[] = [
   {
@@ -429,6 +585,7 @@ const FIRST_VISIT_PRESET_IDS = new Set([
   "empty-org",
   "manage-home-empty",
   "upload-confirmed",
+  "upload-multi-layout",
   "upload-multi",
   "find-location",
   "find-location-search",
@@ -447,9 +604,22 @@ const EDITOR_PRESETS: { id: string; label: string; description: string; state: P
   },
   {
     id: "upload-confirmed",
-    label: "0a · Upload confirmed (1 file)",
-    description: "Single floorplan uploaded — file tile appears below the drop zone (Navan-style confirmation).",
-    state: { ...getFirstVisitDefault(), uploadStage: "confirmed", uploadedFiles: [MOCK_UPLOAD_FILE_ROW] },
+    label: "0a · 1 file, 1 layout uploaded",
+    description: "Single floorplan with one layout — file tile appears below the drop zone, ready for Set location.",
+    state: { ...getFirstVisitDefault(), uploadStage: "confirmed", uploadedFiles: [MOCK_UPLOAD_FILE_ROW], activeLayoutIndex: 1 },
+  },
+  {
+    id: "upload-multi-layout",
+    label: "0a · 1 file, 5 layouts in file",
+    description:
+      "Multi-sheet PDF — layouts appear in a table with address, floor, and building fields pre-filled from PDF reads, plus a suggested building/floor organization.",
+    state: {
+      ...getFirstVisitDefault(),
+      uploadStage: "confirmed",
+      uploadedFiles: [MOCK_MULTI_LAYOUT_FILE],
+      activeLayoutIndex: 1,
+      layoutAssignments: cloneLayoutAssignments(MOCK_PDF_LAYOUT_ASSIGNMENTS),
+    },
   },
   {
     id: "upload-multi",
@@ -676,6 +846,48 @@ const EDITOR_PRESETS: { id: string; label: string; description: string; state: P
   },
 ];
 
+const ADD_FILES_PRESET_IDS = new Set(["add-files-flyout", "add-files-place-linked", "add-files-dragover"]);
+
+const ADD_FILES_PRESETS: { id: string; label: string; description: string; state: Partial<AppState> }[] = [
+  {
+    id: "add-files-flyout",
+    label: "A · Files panel",
+    description: "Org already has buildings — open Files from map chrome to upload another floorplan.",
+    state: {
+      ...getDefaultState(),
+      orgHasFloorplans: true,
+      selectedPlaceId: "floor-3",
+      placeTab: "overview",
+      filesFlyoutOpen: true,
+    },
+  },
+  {
+    id: "add-files-place-linked",
+    label: "A · Place · linked files",
+    description: "Viewer on an existing floor — Linked files section prompts drag or Files upload.",
+    state: {
+      ...getDefaultState(),
+      orgHasFloorplans: true,
+      selectedPlaceId: "floor-3",
+      placeTab: "overview",
+      filesFlyoutOpen: false,
+    },
+  },
+  {
+    id: "add-files-dragover",
+    label: "A · Drag onto map",
+    description: "Drop a floorplan onto the open Place map to bind an unplaced file.",
+    state: {
+      ...getEditorDefault(),
+      editorMode: false,
+      editorEntry: "none",
+      orgHasFloorplans: true,
+      selectedPlaceId: "floor-3",
+      placeTab: "overview",
+    },
+  },
+];
+
 const VIEWER_PRESETS: { id: string; label: string; description: string; state: Partial<AppState> }[] = [
   {
     id: "null",
@@ -725,8 +937,18 @@ function stateLabel(s: AppState): string {
     return `first visit › set location${file ? ` › ${file.fileName}` : ""}`;
   }
   if (!s.orgHasFloorplans && s.uploadStage === "confirmed" && (s.uploadedFiles ?? []).length > 0) {
-    const count = (s.uploadedFiles ?? []).length;
-    return `first visit › ${count} file${count === 1 ? "" : "s"} uploaded`;
+    const file = s.uploadedFiles[0];
+    const layouts = file?.layoutCount ?? 1;
+    if (layouts > 1) {
+      const assigned = (s.layoutAssignments ?? []).length;
+      return assigned > 0
+        ? `first visit › 1 file, ${layouts} layouts › review assignments`
+        : `first visit › 1 file, ${layouts} layouts › layout ${s.activeLayoutIndex ?? 1}`;
+    }
+    const count = s.uploadedFiles.length;
+    return count === 1 && layouts === 1
+      ? "first visit › 1 file, 1 layout uploaded"
+      : `first visit › ${count} file${count === 1 ? "" : "s"} uploaded`;
   }
   if (!s.orgHasFloorplans && !s.editorMode && s.uploadStage === "idle") return "viewer › first visit › onboarding";
   if (s.editorEntry === "manage-home") return "manage maps home";
@@ -747,7 +969,7 @@ function WireBox({
   onClick,
   title,
 }: {
-  children?: unknown;
+  children?: React.ReactNode;
   style?: Record<string, string | number>;
   onClick?: () => void;
   title?: string;
@@ -1796,76 +2018,589 @@ function FloorplanThumbnail() {
   );
 }
 
+function AssignmentSelectField({
+  fieldKey,
+  openField,
+  setOpenField,
+  value,
+  placeholder,
+  sourceHint,
+  matched,
+  searchable,
+  searchQuery,
+  onSearchChange,
+  options,
+  onSelect,
+  newOptionLabel,
+  onSelectNew,
+  footer,
+}: {
+  fieldKey: string;
+  openField: string | null;
+  setOpenField: (key: string | null) => void;
+  value: string;
+  placeholder: string;
+  sourceHint: string;
+  matched: boolean;
+  searchable?: boolean;
+  searchQuery?: string;
+  onSearchChange?: (value: string) => void;
+  options: { id: string; label: string; sublabel?: string; tone?: "match" | "suggestion" | "default" }[];
+  onSelect: (label: string) => void;
+  newOptionLabel?: string;
+  onSelectNew?: () => void;
+  footer?: ReactNode;
+}) {
+  const theme = useHostTheme();
+  const open = openField === fieldKey;
+
+  return (
+    <div style={{ position: "relative", width: "100%" }} onClick={(e: MouseEvent) => e.stopPropagation()}>
+      <Stack gap={2}>
+      <button
+        type="button"
+        onClick={() => {
+          if (!open && searchable) onSearchChange?.(value);
+          setOpenField(open ? null : fieldKey);
+        }}
+        style={{
+          width: "100%",
+          height: 26,
+          boxSizing: "border-box",
+          padding: "0 8px",
+          borderRadius: 4,
+          border: `1px solid ${open ? theme.accent.primary : theme.stroke.secondary}`,
+          background: matched ? theme.fill.quaternary : theme.bg.editor,
+          color: value ? theme.text.primary : theme.text.tertiary,
+          fontSize: 10,
+          textAlign: "left",
+          cursor: "pointer",
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "space-between",
+          gap: 6,
+        }}
+      >
+        <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+          {value || placeholder}
+        </span>
+        <span style={{ color: theme.text.tertiary, fontSize: 8 }}>{open ? "▴" : "▾"}</span>
+      </button>
+      {open ? (
+        <WireBox
+          style={{
+            position: "absolute",
+            top: "100%",
+            left: 0,
+            right: 0,
+            marginTop: 4,
+            zIndex: 30,
+            padding: 0,
+            overflow: "hidden",
+            boxShadow: `0 8px 24px ${theme.fill.primary}`,
+          }}
+        >
+          {searchable ? (
+            <div style={{ padding: 8, borderBottom: `1px solid ${theme.stroke.tertiary}` }}>
+              <TextInput
+                value={searchQuery ?? ""}
+                onChange={(q) => onSearchChange?.(q)}
+                placeholder="Search address…"
+                type="search"
+                style={{ fontSize: 10, height: 26 }}
+                autoFocus
+              />
+            </div>
+          ) : null}
+          <Stack gap={0} style={{ maxHeight: 180, overflow: "auto" }}>
+            {options.map((option) => (
+              <button
+                key={option.id}
+                type="button"
+                onClick={() => {
+                  onSelect(option.label);
+                  setOpenField(null);
+                }}
+                style={{
+                  width: "100%",
+                  padding: "8px 10px",
+                  border: "none",
+                  borderBottom: `1px solid ${theme.stroke.tertiary}`,
+                  background: option.label === value ? theme.fill.tertiary : "transparent",
+                  textAlign: "left",
+                  cursor: "pointer",
+                }}
+              >
+                <Text
+                  size="small"
+                  weight={option.tone === "match" ? "semibold" : "normal"}
+                  style={{ fontSize: 10, color: option.tone === "match" ? theme.accent.primary : theme.text.primary }}
+                >
+                  {option.label}
+                  {option.tone === "match" ? " · matched in Verkada" : option.tone === "suggestion" ? " · from PDF" : ""}
+                </Text>
+                {option.sublabel ? (
+                  <Text size="small" tone="tertiary" style={{ fontSize: 9 }}>
+                    {option.sublabel}
+                  </Text>
+                ) : null}
+              </button>
+            ))}
+            {newOptionLabel && onSelectNew ? (
+              <button
+                type="button"
+                onClick={() => {
+                  onSelectNew();
+                  setOpenField(null);
+                }}
+                style={{
+                  width: "100%",
+                  padding: "8px 10px",
+                  border: "none",
+                  background: theme.fill.quaternary,
+                  textAlign: "left",
+                  cursor: "pointer",
+                  color: theme.accent.primary,
+                  fontSize: 10,
+                  fontWeight: 600,
+                }}
+              >
+                {newOptionLabel}
+              </button>
+            ) : null}
+          </Stack>
+        </WireBox>
+      ) : null}
+      <Text size="small" tone="tertiary" style={{ fontSize: 9 }}>
+        {sourceHint}
+      </Text>
+      {footer}
+      </Stack>
+    </div>
+  );
+}
+
+function LayoutAssignmentTable({
+  assignments,
+  activeLayoutIndex,
+  onSelectLayout,
+  onUpdateAssignment,
+  onAlignLayout,
+}: {
+  assignments: PdfLayoutAssignment[];
+  activeLayoutIndex: number;
+  onSelectLayout: (index: number) => void;
+  onUpdateAssignment: (
+    layoutIndex: number,
+    patch: Partial<
+      Pick<
+        PdfLayoutAssignment,
+        "address" | "floorLevel" | "building" | "buildingMatchId" | "useCustomBuilding" | "useCustomFloor"
+      >
+    >,
+  ) => void;
+  onAlignLayout: (layoutIndex: number) => void;
+}) {
+  const theme = useHostTheme();
+  const [openField, setOpenField] = useState<string | null>(null);
+  const [addressSearch, setAddressSearch] = useState("");
+
+  const addressOptions = [
+    ...ORG_BUILDINGS.map((b) => ({
+      id: `org-addr-${b.id}`,
+      label: b.address,
+      sublabel: `${b.name} · in Verkada`,
+      tone: "match" as const,
+    })),
+    ...filterAddressSuggestions(addressSearch).map((s) => ({
+      id: s.id,
+      label: s.address,
+      sublabel: s.label,
+      tone: "default" as const,
+    })),
+  ].filter((option, index, all) => all.findIndex((o) => o.label === option.label) === index);
+
+  return (
+    <Stack gap={10} style={{ padding: "8px 0 4px", width: "100%", textAlign: "left" }}>
+      <Callout tone="info" title="Layouts read from PDF">
+        <Text size="small" tone="secondary">
+          We read sheet titles and metadata from your upload. Match each layout to an address, floor, and building in
+          Verkada — then align on the map.
+        </Text>
+      </Callout>
+
+      <WireBox style={{ padding: 0, overflow: "visible" }}>
+        <div style={{ overflowX: "auto" }}>
+          <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 11 }}>
+            <thead>
+              <tr style={{ background: theme.fill.quaternary }}>
+                {["Layout", "Address", "Floor", "Building"].map((header) => (
+                  <th
+                    key={header}
+                    style={{
+                      textAlign: "left",
+                      padding: "8px 10px",
+                      color: theme.text.secondary,
+                      fontWeight: 600,
+                      borderBottom: `1px solid ${theme.stroke.tertiary}`,
+                      whiteSpace: "nowrap",
+                    }}
+                  >
+                    {header}
+                  </th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {assignments.map((row) => {
+                const selected = row.layoutIndex === activeLayoutIndex;
+                const complete = isLayoutRowComplete(row);
+                const orgBuilding = findOrgBuildingById(row.buildingMatchId) ?? findOrgBuildingByName(row.building);
+                const buildingMatched = Boolean(orgBuilding && !row.useCustomBuilding);
+                const floorOptions = getFloorsForAssignment(row).map((floor, i) => ({
+                  id: `floor-${i}`,
+                  label: floor,
+                  tone: orgBuilding?.floors.includes(floor) ? ("match" as const) : ("suggestion" as const),
+                }));
+                const floorMatched = Boolean(
+                  orgBuilding?.floors.includes(row.floorLevel) && !row.useCustomFloor && row.floorLevel,
+                );
+                const buildingOptions = [
+                  ...ORG_BUILDINGS.map((b) => ({
+                    id: b.id,
+                    label: b.name,
+                    sublabel: b.address,
+                    tone: (b.id === row.buildingMatchId ? "match" : "default") as "match" | "default",
+                  })),
+                  ...(row.building && !ORG_BUILDINGS.some((b) => b.name === row.building)
+                    ? [
+                        {
+                          id: "pdf-building",
+                          label: row.building,
+                          sublabel: "Read from PDF",
+                          tone: "suggestion" as const,
+                        },
+                      ]
+                    : []),
+                ];
+
+                return (
+                  <tr
+                    key={row.layoutIndex}
+                    onClick={() => onSelectLayout(row.layoutIndex)}
+                    style={{
+                      background: selected ? theme.fill.tertiary : "transparent",
+                      cursor: "pointer",
+                      verticalAlign: "top",
+                    }}
+                  >
+                    <td style={{ padding: "8px 10px", borderBottom: `1px solid ${theme.stroke.tertiary}`, minWidth: 120 }}>
+                      <Stack gap={2}>
+                        <Text size="small" weight="semibold">
+                          Sheet {row.layoutIndex}
+                        </Text>
+                        <Text size="small" tone="tertiary" style={{ fontSize: 10 }}>
+                          {row.pdfLabel}
+                        </Text>
+                      </Stack>
+                    </td>
+                    <td style={{ padding: "8px 10px", borderBottom: `1px solid ${theme.stroke.tertiary}`, minWidth: 210 }}>
+                      <AssignmentSelectField
+                        fieldKey={`${row.layoutIndex}-address`}
+                        openField={openField}
+                        setOpenField={setOpenField}
+                        value={row.address}
+                        placeholder="Select address"
+                        sourceHint={fieldSourceHint(row.fieldSources.address)}
+                        matched={Boolean(row.address && VERKADA_ADDRESS_SUGGESTIONS.some((s) => s.address === row.address))}
+                        searchable
+                        searchQuery={openField === `${row.layoutIndex}-address` ? addressSearch : row.address}
+                        onSearchChange={setAddressSearch}
+                        options={addressOptions}
+                        onSelect={(address) => onUpdateAssignment(row.layoutIndex, { address })}
+                        footer={
+                          <button
+                            type="button"
+                            disabled={!complete}
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              if (!complete) return;
+                              onSelectLayout(row.layoutIndex);
+                              onAlignLayout(row.layoutIndex);
+                            }}
+                            style={{
+                              marginTop: 2,
+                              background: "none",
+                              border: "none",
+                              padding: 0,
+                              fontSize: 10,
+                              fontWeight: 500,
+                              color: complete ? theme.accent.primary : theme.text.quaternary,
+                              cursor: complete ? "pointer" : "not-allowed",
+                              textDecoration: complete ? "underline" : "none",
+                              textAlign: "left",
+                            }}
+                          >
+                            Align Layout on Map
+                          </button>
+                        }
+                      />
+                    </td>
+                    <td style={{ padding: "8px 10px", borderBottom: `1px solid ${theme.stroke.tertiary}`, minWidth: 130 }}>
+                      {row.useCustomFloor ? (
+                        <div onClick={(e: MouseEvent) => e.stopPropagation()}>
+                          <Stack gap={2}>
+                          <TextInput
+                            value={row.floorLevel}
+                            onChange={(value) => onUpdateAssignment(row.layoutIndex, { floorLevel: value })}
+                            placeholder="New floor name"
+                            style={{ fontSize: 10, height: 26 }}
+                          />
+                          <Text size="small" tone="tertiary" style={{ fontSize: 9 }}>
+                            {fieldSourceHint(row.fieldSources.floorLevel)}
+                          </Text>
+                          <button
+                            type="button"
+                            onClick={() => onUpdateAssignment(row.layoutIndex, { useCustomFloor: false })}
+                            style={{
+                              background: "none",
+                              border: "none",
+                              padding: 0,
+                              fontSize: 9,
+                              color: theme.text.link,
+                              cursor: "pointer",
+                              textDecoration: "underline",
+                              textAlign: "left",
+                            }}
+                          >
+                            Choose existing floor
+                          </button>
+                          </Stack>
+                        </div>
+                      ) : (
+                        <AssignmentSelectField
+                          fieldKey={`${row.layoutIndex}-floor`}
+                          openField={openField}
+                          setOpenField={setOpenField}
+                          value={row.floorLevel}
+                          placeholder="Select floor"
+                          sourceHint={fieldSourceHint(row.fieldSources.floorLevel)}
+                          matched={floorMatched}
+                          options={floorOptions}
+                          onSelect={(floorLevel) =>
+                            onUpdateAssignment(row.layoutIndex, { floorLevel, useCustomFloor: false })
+                          }
+                          newOptionLabel="+ New Floor"
+                          onSelectNew={() =>
+                            onUpdateAssignment(row.layoutIndex, {
+                              useCustomFloor: true,
+                              floorLevel: row.floorLevel || "New floor",
+                            })
+                          }
+                        />
+                      )}
+                    </td>
+                    <td style={{ padding: "8px 10px", borderBottom: `1px solid ${theme.stroke.tertiary}`, minWidth: 150 }}>
+                      {row.useCustomBuilding ? (
+                        <div onClick={(e: MouseEvent) => e.stopPropagation()}>
+                          <Stack gap={2}>
+                          <TextInput
+                            value={row.building}
+                            onChange={(value) =>
+                              onUpdateAssignment(row.layoutIndex, { building: value, buildingMatchId: null })
+                            }
+                            placeholder="New building name"
+                            style={{ fontSize: 10, height: 26 }}
+                          />
+                          <Text size="small" tone="tertiary" style={{ fontSize: 9 }}>
+                            {fieldSourceHint(row.fieldSources.building)}
+                          </Text>
+                          <button
+                            type="button"
+                            onClick={() => onUpdateAssignment(row.layoutIndex, { useCustomBuilding: false })}
+                            style={{
+                              background: "none",
+                              border: "none",
+                              padding: 0,
+                              fontSize: 9,
+                              color: theme.text.link,
+                              cursor: "pointer",
+                              textDecoration: "underline",
+                              textAlign: "left",
+                            }}
+                          >
+                            Choose existing building
+                          </button>
+                          </Stack>
+                        </div>
+                      ) : (
+                        <AssignmentSelectField
+                          fieldKey={`${row.layoutIndex}-building`}
+                          openField={openField}
+                          setOpenField={setOpenField}
+                          value={row.building}
+                          placeholder="Select building"
+                          sourceHint={fieldSourceHint(row.fieldSources.building)}
+                          matched={buildingMatched}
+                          options={buildingOptions}
+                          onSelect={(building) => {
+                            const match = findOrgBuildingByName(building);
+                            onUpdateAssignment(row.layoutIndex, {
+                              building,
+                              buildingMatchId: match?.id ?? null,
+                              useCustomBuilding: !match,
+                              address: match?.address ?? row.address,
+                            });
+                          }}
+                          newOptionLabel="+ New Building"
+                          onSelectNew={() =>
+                            onUpdateAssignment(row.layoutIndex, {
+                              useCustomBuilding: true,
+                              buildingMatchId: null,
+                              building: row.building || "New building",
+                            })
+                          }
+                        />
+                      )}
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+      </WireBox>
+    </Stack>
+  );
+}
+
 function UploadedFileTile({
   file,
+  layoutAssignments,
+  activeLayoutIndex,
+  onSelectLayout,
+  onUpdateAssignment,
   onRemove,
-  onSetLocation,
+  onAlignLayout,
 }: {
   file: MockUploadedFile;
+  layoutAssignments: PdfLayoutAssignment[];
+  activeLayoutIndex: number;
+  onSelectLayout: (index: number) => void;
+  onUpdateAssignment: (
+    layoutIndex: number,
+    patch: Partial<
+      Pick<
+        PdfLayoutAssignment,
+        "address" | "floorLevel" | "building" | "buildingMatchId" | "useCustomBuilding" | "useCustomFloor"
+      >
+    >,
+  ) => void;
   onRemove: () => void;
-  onSetLocation: () => void;
+  onAlignLayout: (layoutIndex: number) => void;
 }) {
   const theme = useHostTheme();
   const hasLocation = !!file.locationAddress;
+  const layoutCount = file.layoutCount ?? 1;
+  const multiLayout = layoutCount > 1;
 
   return (
-    <Row
-      align="center"
-      gap={8}
-      style={{
-        padding: "10px 4px",
-        borderTop: `1px solid ${theme.stroke.tertiary}`,
-        width: "100%",
-      }}
-    >
-      <UploadCheckIcon />
-      <FloorplanThumbnail />
-      <Text size="small" weight="semibold" style={{ flex: 1, minWidth: 0, textAlign: "left" }} truncate>
-        {file.fileName}
-      </Text>
-      {hasLocation ? (
-        <Chip label={file.locationAddress!.split(",")[0]} tone="success" />
-      ) : (
+    <Stack gap={0} style={{ width: "100%" }}>
+      <Row
+        align="center"
+        gap={8}
+        style={{
+          padding: "10px 4px",
+          borderTop: `1px solid ${theme.stroke.tertiary}`,
+          width: "100%",
+        }}
+      >
+        <UploadCheckIcon />
+        <FloorplanThumbnail />
+        <Stack gap={2} style={{ flex: 1, minWidth: 0, textAlign: "left" }}>
+          <Text size="small" weight="semibold" truncate>
+            {file.fileName}
+          </Text>
+          {multiLayout ? (
+            <Text size="small" tone="tertiary" style={{ fontSize: 10 }}>
+              {layoutCount} layouts detected · fields read from PDF
+            </Text>
+          ) : null}
+        </Stack>
+        {multiLayout ? (
+          <Chip label={`${layoutCount} layouts`} tone="accent" />
+        ) : hasLocation ? (
+          <Chip label={file.locationAddress!.split(",")[0]} tone="success" />
+        ) : (
+          <Button
+            variant="secondary"
+            onClick={(e) => {
+              e.stopPropagation();
+              onAlignLayout(1);
+            }}
+            style={{ fontSize: 10, padding: "4px 8px", whiteSpace: "nowrap" }}
+          >
+            Set location
+          </Button>
+        )}
         <Button
-          variant="secondary"
+          variant="ghost"
           onClick={(e) => {
             e.stopPropagation();
-            onSetLocation();
+            onRemove();
           }}
-          style={{ fontSize: 10, padding: "4px 8px", whiteSpace: "nowrap" }}
+          style={{ fontSize: 12, padding: "2px 8px", minWidth: 0 }}
+          title="Remove file"
         >
-          Set location
+          x
         </Button>
-      )}
-      <Button
-        variant="ghost"
-        onClick={(e) => {
-          e.stopPropagation();
-          onRemove();
-        }}
-        style={{ fontSize: 12, padding: "2px 8px", minWidth: 0 }}
-        title="Remove file"
-      >
-        x
-      </Button>
-    </Row>
+      </Row>
+      {multiLayout && !hasLocation && layoutAssignments.length > 0 ? (
+        <div style={{ padding: "0 4px 8px" }}>
+          <LayoutAssignmentTable
+            assignments={layoutAssignments}
+            activeLayoutIndex={activeLayoutIndex}
+            onSelectLayout={onSelectLayout}
+            onUpdateAssignment={onUpdateAssignment}
+            onAlignLayout={onAlignLayout}
+          />
+        </div>
+      ) : null}
+    </Stack>
   );
 }
 
 function FirstVisitUploadCard({
   uploadedFiles,
+  layoutAssignments,
+  activeLayoutIndex,
+  onSelectLayout,
+  onUpdateAssignment,
   onUploadFile,
   onRemoveFile,
-  onSetLocation,
+  onAlignLayout,
 }: {
   uploadedFiles: MockUploadedFile[];
+  layoutAssignments: PdfLayoutAssignment[];
+  activeLayoutIndex: number;
+  onSelectLayout: (index: number) => void;
+  onUpdateAssignment: (
+    layoutIndex: number,
+    patch: Partial<
+      Pick<
+        PdfLayoutAssignment,
+        "address" | "floorLevel" | "building" | "buildingMatchId" | "useCustomBuilding" | "useCustomFloor"
+      >
+    >,
+  ) => void;
   onUploadFile: () => void;
   onRemoveFile: (id: string) => void;
-  onSetLocation: (id: string) => void;
+  onAlignLayout: (layoutIndex: number) => void;
 }) {
   const theme = useHostTheme();
   const [dropHover, setDropHover] = useState(false);
   const hasFiles = uploadedFiles.length > 0;
+  const hasMultiLayout = uploadedFiles.some((file) => (file.layoutCount ?? 1) > 1);
 
   return (
     <Card
@@ -1874,8 +2609,8 @@ function FirstVisitUploadCard({
         top: "50%",
         left: "50%",
         transform: "translate(-50%, -50%)",
-        width: 480,
-        maxWidth: "92%",
+        width: hasMultiLayout ? 760 : 480,
+        maxWidth: "96%",
         zIndex: 15,
       }}
     >
@@ -1945,8 +2680,12 @@ function FirstVisitUploadCard({
                     <UploadedFileTile
                       key={file.id}
                       file={file}
+                      layoutAssignments={layoutAssignments}
+                      activeLayoutIndex={activeLayoutIndex}
+                      onSelectLayout={onSelectLayout}
+                      onUpdateAssignment={onUpdateAssignment}
                       onRemove={() => onRemoveFile(file.id)}
-                      onSetLocation={() => onSetLocation(file.id)}
+                      onAlignLayout={onAlignLayout}
                     />
                   ))}
                 </div>
@@ -2199,14 +2938,13 @@ const LOCATION_FLOW_STEPS: Record<
 
 function LocationFlowSidePanel({
   step,
-  fileName,
   onBack,
   children,
 }: {
   step: LocationFlowStep;
   fileName: string;
   onBack?: () => void;
-  children: unknown;
+  children: React.ReactNode;
 }) {
   const theme = useHostTheme();
   const meta = LOCATION_FLOW_STEPS[step];
@@ -2756,14 +3494,37 @@ function PrototypeFrame({
       uploadedFiles: next,
       uploadStage: next.length === 0 ? "idle" : "confirmed",
       locatingFileId: state.locatingFileId === id ? null : state.locatingFileId,
+      layoutAssignments: next.some((f) => (f.layoutCount ?? 1) > 1) ? state.layoutAssignments : [],
+      activeLayoutIndex: 1,
     });
   };
 
-  const beginLocationForFile = (fileId: string) => {
+  const updateLayoutAssignment = (
+    layoutIndex: number,
+    patch: Partial<
+      Pick<
+        PdfLayoutAssignment,
+        "address" | "floorLevel" | "building" | "buildingMatchId" | "useCustomBuilding" | "useCustomFloor"
+      >
+    >,
+  ) => {
+    setState({
+      layoutAssignments: (state.layoutAssignments ?? []).map((row) =>
+        row.layoutIndex === layoutIndex ? { ...row, ...patch } : row,
+      ),
+    });
+  };
+
+  const beginLocationForLayout = (layoutIndex: number) => {
+    const multiFile = uploadedFiles.find((f) => (f.layoutCount ?? 1) > 1);
+    const fileId = multiFile?.id ?? uploadedFiles[0]?.id;
+    if (!fileId) return;
+    const assignment = (state.layoutAssignments ?? []).find((row) => row.layoutIndex === layoutIndex);
     setState({
       uploadStage: "locating",
       locatingFileId: fileId,
-      locationQuery: "",
+      activeLayoutIndex: layoutIndex,
+      locationQuery: assignment?.address ?? "",
       locationSearchFocused: false,
       locationPinned: false,
       selectedAddressId: null,
@@ -3142,14 +3903,32 @@ function PrototypeFrame({
         {isFirstVisitUpload ? (
           <FirstVisitUploadCard
             uploadedFiles={uploadedFiles}
+            layoutAssignments={state.layoutAssignments ?? []}
+            activeLayoutIndex={state.activeLayoutIndex ?? 1}
+            onSelectLayout={(index) => setState({ activeLayoutIndex: index })}
+            onUpdateAssignment={updateLayoutAssignment}
             onUploadFile={simulateFileUpload}
             onRemoveFile={removeUploadedFile}
-            onSetLocation={beginLocationForFile}
+            onAlignLayout={beginLocationForLayout}
           />
         ) : null}
 
         {isLocatingFloorplan && locatingFile ? (
-          <LocationFlowSidePanel step="search" fileName={locatingFile.fileName} onBack={cancelLocationSetup}>
+          <LocationFlowSidePanel
+            step="search"
+            fileName={(() => {
+              const assignment = (state.layoutAssignments ?? []).find(
+                (row) => row.layoutIndex === (state.activeLayoutIndex ?? 1),
+              );
+              const base =
+                (locatingFile.layoutCount ?? 1) > 1
+                  ? `${locatingFile.fileName} · Sheet ${state.activeLayoutIndex ?? 1}`
+                  : locatingFile.fileName;
+              if (!assignment) return base;
+              return `${base} · ${assignment.building} · ${assignment.floorLevel}`;
+            })()}
+            onBack={cancelLocationSetup}
+          >
             <LocationSearchStepContent
               query={state.locationQuery}
               searchFocused={state.locationSearchFocused ?? false}
@@ -3633,8 +4412,11 @@ export default function AzaleasMaps20Canvas() {
     alignOffsetY: 0,
     siteSearchQuery: "",
     selectedSiteIds: [],
+    activeLayoutIndex: 1,
+    layoutAssignments: [],
   });
   const [activePreset, setActivePreset] = useCanvasState<string>("maps2-nav-preset", "first-visit");
+  const [activeUseCase, setActiveUseCase] = useCanvasState<PrototypeUseCase>("maps2-use-case", "first-visit");
   const [workspaceFocus, setWorkspaceFocus] = useCanvasState<WorkspaceFocus>("maps2-workspace-focus", "editor");
 
   const setState = useCallback(
@@ -3644,11 +4426,15 @@ export default function AzaleasMaps20Canvas() {
 
   const jumpToPreset = useCallback(
     (id: string) => {
-      const preset = PRESET_STATES.find((p) => p.id === id);
+      const preset = [...EDITOR_PRESETS, ...ADD_FILES_PRESETS, ...VIEWER_PRESETS].find((p) => p.id === id);
       if (!preset) return;
       setActivePreset(id);
       const base = FIRST_VISIT_PRESET_IDS.has(id)
-          ? getFirstVisitDefault()
+        ? getFirstVisitDefault()
+        : ADD_FILES_PRESET_IDS.has(id)
+          ? id === "add-files-dragover"
+            ? getEditorDefault()
+            : getDefaultState()
           : EDITOR_PRESETS.some((p) => p.id === id)
             ? getEditorDefault()
             : getDefaultState();
@@ -3657,44 +4443,50 @@ export default function AzaleasMaps20Canvas() {
     [setActivePreset, setStateRaw],
   );
 
-  const currentPreset = PRESET_STATES.find((p) => p.id === activePreset) ?? EDITOR_PRESETS[0];
-  const showDropHint = activePreset === "editor-drop";
+  const allPresets = [...EDITOR_PRESETS, ...ADD_FILES_PRESETS, ...VIEWER_PRESETS];
+  const currentPreset = allPresets.find((p) => p.id === activePreset) ?? EDITOR_PRESETS[0];
+  const showDropHint = activePreset === "editor-drop" || activePreset === "add-files-dragover";
 
-  const visiblePresets = workspaceFocus === "editor" ? EDITOR_PRESETS : PRESET_STATES;
+  const firstVisitPresets = EDITOR_PRESETS.filter(
+    (p) => FIRST_VISIT_PRESET_IDS.has(p.id) || p.id === "manage-home-empty",
+  );
+  const useCasePresets = activeUseCase === "first-visit" ? firstVisitPresets : ADD_FILES_PRESETS;
+  const visiblePresets =
+    workspaceFocus === "full" && activeUseCase === "first-visit"
+      ? PRESET_STATES
+      : workspaceFocus === "full" && activeUseCase === "add-files"
+        ? [...ADD_FILES_PRESETS, ...VIEWER_PRESETS.filter((p) => p.id === "files")]
+        : useCasePresets;
+
+  const switchUseCase = (useCase: PrototypeUseCase) => {
+    setActiveUseCase(useCase);
+    jumpToPreset(useCase === "first-visit" ? "first-visit" : ADD_FILES_PRESETS[0].id);
+  };
 
   return (
-    <Stack gap={20}>
-      <Stack gap={6}>
-        <H1>Azalea&apos;s Maps 2.0 Canvas</H1>
-        <Text tone="secondary">
-          Editor experience workspace — first visit to Maps (state 0), in-context edit mode, tool palette,
-          device placement, and structural drawing. Built on the{" "}
-          <Link href="https://ankush-rustagi.github.io/maps-2-0-nav-audit/">Navigation Audit</Link> IA with
-          Maps v1 PRD editor MVP scope.
+    <Stack gap={12}>
+      <Row gap={6} wrap align="center">
+        <Text size="small" tone="tertiary" style={{ fontSize: 10, textTransform: "uppercase" }}>
+          Use case
         </Text>
-        <Row gap={6} wrap>
-          <Pill
-            active={workspaceFocus === "editor"}
-            onClick={() => setWorkspaceFocus("editor")}
-            size="sm"
-          >
-            Editor focus
-          </Pill>
-          <Pill
-            active={workspaceFocus === "full"}
-            onClick={() => setWorkspaceFocus("full")}
-            size="sm"
-          >
-            Full IA
-          </Pill>
-          <Pill size="sm">{EDITOR_PRESETS.length} editor states</Pill>
-          <Pill size="sm">PRD M2 MVP</Pill>
-        </Row>
-      </Stack>
+        <Pill active={activeUseCase === "first-visit"} onClick={() => switchUseCase("first-visit")} size="sm">
+          First visit
+        </Pill>
+        <Pill active={activeUseCase === "add-files"} onClick={() => switchUseCase("add-files")} size="sm">
+          Add files
+        </Pill>
+        <Spacer />
+        <Pill active={workspaceFocus === "editor"} onClick={() => setWorkspaceFocus("editor")} size="sm">
+          Focused
+        </Pill>
+        <Pill active={workspaceFocus === "full"} onClick={() => setWorkspaceFocus("full")} size="sm">
+          Full IA
+        </Pill>
+      </Row>
 
       <Grid columns="220px 1fr" gap={16} align="start">
         <Stack gap={8}>
-          <H3>{workspaceFocus === "editor" ? "Editor states" : "All states"}</H3>
+          <H3>{activeUseCase === "add-files" ? "Add files" : workspaceFocus === "editor" ? "Onboarding" : "All states"}</H3>
           <Stack gap={4}>
             {visiblePresets.map((preset) => (
               <Button
@@ -3718,8 +4510,11 @@ export default function AzaleasMaps20Canvas() {
             <Text size="small" weight="semibold">
               {stateLabel(state)}
             </Text>
-            <Button variant="ghost" onClick={() => jumpToPreset("first-visit")}>
-              Reset to first visit
+            <Button variant="ghost" onClick={() => jumpToPreset("upload-confirmed")}>
+              1 file, 1 layout uploaded
+            </Button>
+            <Button variant="ghost" onClick={() => jumpToPreset("upload-multi-layout")}>
+              1 file, 5 layouts in file uploaded
             </Button>
             <Button variant="ghost" onClick={() => jumpToPreset("editor-idle")}>
               Jump to editor idle
@@ -3728,66 +4523,33 @@ export default function AzaleasMaps20Canvas() {
 
           <PrototypeFrame state={state} setState={setState} showDropHint={showDropHint} />
 
-          <Callout tone="info" title={currentPreset.label}>
-            {currentPreset.description}
-          </Callout>
+          <PresetContextBar label={currentPreset.label} description={currentPreset.description} />
         </Stack>
       </Grid>
-
-      <Divider />
-
-      <Stack gap={10}>
-        <H2>Editor layout</H2>
-        <Text tone="secondary">
-          Hybrid entry: first visit (0) → upload files with per-file Set location → globe address search (0c) →
-          editor align. Each floorplan can map to a different building address.
-        </Text>
-        <Grid columns={3} gap={12}>
-          <Stack gap={4}>
-            <Text weight="semibold">Left panel</Text>
-            <Text size="small" tone="secondary">
-              Floor breadcrumb, placed devices, unplaced device shortcuts
-            </Text>
-          </Stack>
-          <Stack gap={4}>
-            <Text weight="semibold">Canvas</Text>
-            <Text size="small" tone="secondary">
-              Tool overlays: walls, FOV cones, cables, rulers, areas, stamp cursor
-            </Text>
-          </Stack>
-          <Stack gap={4}>
-            <Text weight="semibold">Right panel (340px target)</Text>
-            <Text size="small" tone="secondary">
-              Tools grouped by Structural / Devices / Paths / Space — swaps to properties per selection
-            </Text>
-          </Stack>
-        </Grid>
-      </Stack>
-
-      <Stack gap={8}>
-        <H2>PRD P0 editor scope</H2>
-        <Grid columns={2} gap={8}>
-          {[
-            "Draw walls, doors, windows",
-            "Place & reposition device tokens",
-            "Adjust FOV cone per camera",
-            "Draw cable paths with autosnap",
-            "Rulers / measurement lines",
-            "Create & reshape areas/zones",
-            "Place labels (room, entry, exit)",
-            "Scale & align floorplan to walls",
-            "Undo/redo within session",
-          ].map((item) => (
-            <Text key={item} size="small" tone="secondary">
-              · {item}
-            </Text>
-          ))}
-        </Grid>
-      </Stack>
-
-      <Text size="small" tone="tertiary">
-        Source: Maps v1 PRD · IA draft §6 · Site Planner editor · nav audit mock · May 2026
-      </Text>
     </Stack>
+  );
+}
+
+function PresetContextBar({ label, description }: { label: string; description: string }) {
+  const theme = useHostTheme();
+  return (
+    <Row
+      gap={8}
+      align="center"
+      style={{
+        padding: "6px 10px",
+        borderRadius: 4,
+        border: `1px solid ${theme.stroke.tertiary}`,
+        background: theme.fill.quaternary,
+        minHeight: 0,
+      }}
+    >
+      <Text size="small" weight="semibold" style={{ flexShrink: 0, maxWidth: "38%" }} truncate>
+        {label}
+      </Text>
+      <Text size="small" tone="secondary" style={{ flex: 1, minWidth: 0 }} truncate>
+        {description}
+      </Text>
+    </Row>
   );
 }

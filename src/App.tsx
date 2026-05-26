@@ -22,7 +22,7 @@ export default function App() {
         />
 
         <Callout variant="info" title="Interactive prototype">
-          Click preset states on the left to jump between first-visit onboarding (upload → set location → align → select sites) and editor scenarios. State persists in localStorage.
+          Switch use case above the mock: <strong>First visit</strong> (onboarding upload flow) or <strong>Add files</strong> (org already has Maps). Preset context is a compact strip below the frame.
         </Callout>
 
         <EditorPrototype />
