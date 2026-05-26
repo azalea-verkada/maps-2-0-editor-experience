@@ -1,19 +1,29 @@
-# Deploy to ankush-rustagi.github.io
+# Deploy: local → staging → prod
 
-This project is packaged for the [Ankush Rustagi Hub](https://ankush-rustagi.github.io/).
+## Staging (your hub)
 
-## Live URL (after org import)
+**Hub:** https://azalea-verkada.github.io/  
+**This app:** https://azalea-verkada.github.io/maps-2-0-editor-experience/
 
-https://ankush-rustagi.github.io/maps-2-0-editor-experience/
+Repos:
+- Hub: `azalea-verkada/azalea-verkada.github.io`
+- App: `azalea-verkada/maps-2-0-editor-experience`
 
-## One-time setup (Ankush / org admin)
+Push to `main` on the app repo → GitHub Actions deploys. Add/update hub card in `azalea-verkada.github.io/src/data/prototypes.ts`.
 
-1. Import this repo into `Ankush-Rustagi/maps-2-0-editor-experience`  
-   Source: https://github.com/azalea-verkada/maps-2-0-editor-experience
-2. Ensure `.github/workflows/deploy.yml` exists (copy from `maps-2-0-nav-audit`)
-3. Repo **Settings → Pages → Build and deployment → GitHub Actions**
-4. Merge hub PR: https://github.com/Ankush-Rustagi/Ankush-Rustagi.github.io/pull/1
+## Prod (team source of truth)
+
+**Hub:** https://ankush-rustagi.github.io/  
+**This app (after promote):** https://ankush-rustagi.github.io/maps-2-0-editor-experience/
+
+### One-time prod setup (Ankush / org admin)
+
+1. Import `azalea-verkada/maps-2-0-editor-experience` → `Ankush-Rustagi/maps-2-0-editor-experience`
+2. Enable **Settings → Pages → GitHub Actions**
+3. Merge hub PR on `Ankush-Rustagi/Ankush-Rustagi.github.io` (add card in `prototypes.ts` + `site-updates.ts`)
+
+See also: `../azalea-verkada.github.io/WORKFLOW.md`
 
 ## Author
 
-Azalea Phangsoa — credited as **Creator** on the hub card and in the site What's New banner.
+Azalea Phangsoa — credited as **Creator** on hub cards.
